@@ -1,0 +1,64 @@
+name: Publish build output to a branch
+
+# Copies a finished build's DLL, symbols and full job log onto the
+# "build-output" branch, so they can be fetched with plain git.
+
+on:
+  workflow_run:
+    workflows: ["Build FittingRoom.dll"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Build run id to publish"
+        required: true
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RUN_ID: ${{ github.event.inputs.run_id || github.event.workflow_run.id }}
+    steps:
+      - name: Download the plugin
+        uses: actions/download-artifact@v4
+        with:
+          name: FittingRoom-WornItem
+          path: out/FittingRoom-WornItem
+          run-id: ${{ env.RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download the symbols
+        uses: actions/download-artifact@v4
+        with:
+          name: FittingRoom-pdb
+          path: out/pdb
+          run-id: ${{ env.RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch the build log
+        run: |
+          job=$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID/jobs" --jq '.jobs[0].id')
+          gh api "repos/${{ github.repository }}/actions/jobs/$job/logs" > out/build-log.txt
+          sha=$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID" --jq '.head_sha')
+          {
+            echo "run: $RUN_ID"
+            echo "source commit: $sha"
+            sha256sum out/FittingRoom-WornItem/SKSE/Plugins/FittingRoom.dll
+          } > out/BUILD-INFO.txt
+          cat out/BUILD-INFO.txt
+
+      - name: Commit to the build-output branch
+        run: |
+          cd out
+          git init -q -b build-output
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Build output for run $RUN_ID"
+          git push -f "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" build-output
