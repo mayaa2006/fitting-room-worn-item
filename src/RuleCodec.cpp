@@ -34,6 +34,7 @@ namespace OS::RuleCodec {
             case ConditionKind::kRegion:    return "region";
             case ConditionKind::kVampire:   return "vampire";
             case ConditionKind::kCasting:   return "casting";
+            case ConditionKind::kWornItem:  return "wornItem";
             }
             return "";  // a case missed above, or an out-of-range enum value
         }
@@ -230,6 +231,9 @@ namespace OS::RuleCodec {
             case ConditionKind::kWornSlot:
                 cv["slot"] = c.slotBit;
                 break;
+            case ConditionKind::kWornItem:
+                cv["item"] = FormToJson(c.form);
+                break;
             case ConditionKind::kAdvanced:
                 cv["text"] = c.advancedText;
                 break;
@@ -393,6 +397,16 @@ namespace OS::RuleCodec {
                         if (a_warnings) {
                             a_warnings->push_back("rule " + a_out.id +
                                                   ": region condition has an invalid \"region\" "
+                                                  "form, clause skipped");
+                        }
+                        continue;
+                    }
+                    break;
+                case ConditionKind::kWornItem:
+                    if (!JsonToForm(cv["item"], c.form)) {
+                        if (a_warnings) {
+                            a_warnings->push_back("rule " + a_out.id +
+                                                  ": wornItem condition has an invalid \"item\" "
                                                   "form, clause skipped");
                         }
                         continue;

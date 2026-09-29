@@ -70,6 +70,18 @@ namespace OS::Rules {
         // return is not dwell-gated on top. Field report, 2026-08-14: "it takes
         // so long to switch back when we stop casting".
         kCasting,
+        // A SPECIFIC worn item, by form: "wearing the Wooden Mask". Unlike
+        // kWornSlot, which asks whether ANYTHING covers a biped slot, this asks
+        // whether one named ARMO is on the player's REAL gear. The pair exists
+        // because a rule that wants "the Wooden Mask outfit while the mask is
+        // on" cannot be written with a slot test: the slot is occupied by every
+        // other hat too.
+        //
+        // Reads REAL worn armor (the same walk kWornSlot uses), never the
+        // transmog look, so an outfit that shows the mask does not turn the rule
+        // on and lock itself in. It is a plain snapshot state like the others:
+        // no event, no edge, no bypass.
+        kWornItem,
     };
 
     enum class WeatherFlag : std::uint8_t { kRaining = 0, kSnowing = 1 };
@@ -78,7 +90,7 @@ namespace OS::Rules {
         ConditionKind kind{ ConditionKind::kInterior };
         bool          negate{ false };
 
-        FormKey       form;                              // kLocation, kCell, kRegion
+        FormKey       form;                              // kLocation, kCell, kRegion, kWornItem
         WeatherFlag   weather{ WeatherFlag::kRaining };   // kWeather
         float         startHour{ 0.0f };                 // kTimeOfDay
         float         endHour{ 0.0f };                   // kTimeOfDay
@@ -144,6 +156,10 @@ namespace OS::Rules {
         bool                 swimming{ false };
         bool                 mounted{ false };
         std::uint32_t        wornSlotMask{ 0 };
+        // Every distinct ARMO the player really wears, for kWornItem. A list
+        // rather than a set because it holds a handful of entries and FormKey
+        // has operator<=> but no hash.
+        std::vector<FormKey> wornItems;
         // Advanced results, resolved engine-side before the pure evaluation.
         // Key is (rule id, clause index within that rule's condition list).
         std::map<std::pair<std::string, std::size_t>, bool> advanced;
@@ -369,6 +385,17 @@ namespace OS::Rules {
         case ConditionKind::kWornSlot:
             hit = a_c.slotBit < kBitCount &&
                   (a_s.wornSlotMask & (1u << a_c.slotBit)) != 0;
+            break;
+        case ConditionKind::kWornItem:
+            // Unset form never matches, same guard as kCell/kLocation/kRegion.
+            if (!a_c.form.Empty()) {
+                for (const auto& w : a_s.wornItems) {
+                    if (w == a_c.form) {
+                        hit = true;
+                        break;
+                    }
+                }
+            }
             break;
         case ConditionKind::kAdvanced: {
             const auto it = a_s.advanced.find({ a_ruleId, a_index });

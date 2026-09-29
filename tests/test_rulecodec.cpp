@@ -388,6 +388,38 @@ int main() {
             CHECK(back.conditions[2].negate);
         }
     }
+    {  // kWornItem carries its form under "item" and round-trips with negate.
+        Rule r;
+        r.id = "worn-item";
+        Condition c;
+        c.kind   = ConditionKind::kWornItem;
+        c.form   = FormKey{ "Dragonborn.esm", 0x0A1B2C };
+        c.negate = true;
+        r.conditions = { c };
+
+        const auto encoded = OS::RuleCodec::RuleToJson(r);
+        CHECK(encoded["conditions"][0]["kind"].asString() == "wornItem");
+        CHECK(encoded["conditions"][0].isMember("item"));
+
+        Rule back;
+        CHECK(OS::RuleCodec::JsonToRule(encoded, back));
+        CHECK(back.conditions.size() == 1);
+        if (back.conditions.size() == 1) {
+            CHECK(back.conditions[0].kind == ConditionKind::kWornItem);
+            CHECK(back.conditions[0].form == c.form);
+            CHECK(back.conditions[0].negate);
+        }
+
+        // A wornItem clause with no usable "item" is skipped with a warning,
+        // not kept as a form-less clause that can never match.
+        Json::Value bad = encoded;
+        bad["conditions"][0].removeMember("item");
+        Rule                     skipped;
+        std::vector<std::string> warnings;
+        CHECK(OS::RuleCodec::JsonToRule(bad, skipped, &warnings));
+        CHECK(skipped.conditions.empty());
+        CHECK(warnings.size() == 1);
+    }
     {  // ⚠⚠ EVERY KIND ROUND-TRIPS, WALKED OFF THE ENUM RATHER THAN LISTED.
         // The test above names the three kinds that were last when it was
         // written, which is exactly how the trap it guards keeps coming back:
@@ -400,7 +432,7 @@ int main() {
         // DROPPED ON LOAD. Both are silent - a clean build, a clean save, and a
         // rule that quietly lost a condition and now matches things it should
         // not.
-        for (std::uint8_t i = 0; i <= static_cast<std::uint8_t>(ConditionKind::kCasting);
+        for (std::uint8_t i = 0; i <= static_cast<std::uint8_t>(ConditionKind::kWornItem);
              ++i) {
             const auto kind = static_cast<ConditionKind>(i);
             Rule       r;
@@ -412,7 +444,7 @@ int main() {
             // skipped, which is its own tested behaviour above and not what
             // this loop is about.
             if (kind == ConditionKind::kLocation || kind == ConditionKind::kCell ||
-                kind == ConditionKind::kRegion) {
+                kind == ConditionKind::kRegion || kind == ConditionKind::kWornItem) {
                 c.form = FormKey{ "Skyrim.esm", 0x800 };
             }
             if (kind == ConditionKind::kAdvanced) {

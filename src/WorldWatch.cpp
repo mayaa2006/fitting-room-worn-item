@@ -566,7 +566,28 @@ namespace OS::WorldWatch {
             // ExtraContainerChanges, not the GetInventory()-builds-a-map
             // path GetWornArmor takes internally.
             if (auto* changes = player->GetInventoryChanges()) {
-                snap.wornSlotMask = SnapshotRealWorn(changes).coverage;
+                const auto real   = SnapshotRealWorn(changes);
+                snap.wornSlotMask = real.coverage;
+                // kWornItem: the distinct ARMOs behind that mask. One armor
+                // covering several slots sits in several armo[] entries, so
+                // dedupe on the pointer first.
+                for (std::uint32_t bit = 0; bit < 32; ++bit) {
+                    auto* armo = real.armo[bit];
+                    if (!armo) {
+                        continue;
+                    }
+                    bool seen = false;
+                    for (std::uint32_t prev = 0; prev < bit; ++prev) {
+                        if (real.armo[prev] == armo) {
+                            seen = true;
+                            break;
+                        }
+                    }
+                    Rules::FormKey key;
+                    if (!seen && MakeFormKey(armo, key)) {
+                        snap.wornItems.push_back(std::move(key));
+                    }
+                }
             }
 
             // Advanced clauses resolved last: main-thread only, per

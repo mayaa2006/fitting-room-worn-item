@@ -387,6 +387,56 @@ int main() {
         CHECK(!Matches(c, s, "r", 0));
     }
 
+    {  // kWornItem is any-of over the snapshot's worn-item list: it matches one
+       // NAMED armor, where kWornSlot only asks whether a slot is covered.
+       // An unset form must never match, and the plugin name is part of the
+       // identity, so the same local id from another mod is a miss.
+        WorldSnapshot s;
+        s.wornItems = { FormKey{ "Skyrim.esm", 0x1000 }, FormKey{ "Dragonborn.esm", 0x2000 } };
+
+        Condition c;
+        c.kind = ConditionKind::kWornItem;
+
+        CHECK(!Matches(c, s, "r", 0));  // form unset
+
+        c.form = FormKey{ "Dragonborn.esm", 0x2000 };
+        CHECK(Matches(c, s, "r", 0));  // second entry, not just the first
+
+        c.form = FormKey{ "Skyrim.esm", 0x1000 };
+        CHECK(Matches(c, s, "r", 0));
+
+        c.form = FormKey{ "Dawnguard.esm", 0x1000 };  // right id, wrong plugin
+        CHECK(!Matches(c, s, "r", 0));
+
+        // Negate inverts it: "not wearing the mask".
+        c.form   = FormKey{ "Skyrim.esm", 0x1000 };
+        c.negate = true;
+        CHECK(!Matches(c, s, "r", 0));
+
+        // Nothing worn: the positive form is false, the negated form is true.
+        s.wornItems.clear();
+        CHECK(Matches(c, s, "r", 0));
+        c.negate = false;
+        CHECK(!Matches(c, s, "r", 0));
+    }
+    {  // The Wooden Mask use case at the rule level: a rule keyed on the worn
+       // item matches only while the item is in the worn list.
+        Rule mask;
+        mask.id                = "mask";
+        mask.name              = "Wooden Mask look";
+        mask.base.kind         = BaseKind::kOutfit;
+        mask.base.outfitName   = "Regular + Mask";
+        Condition c;
+        c.kind       = ConditionKind::kWornItem;
+        c.form       = FormKey{ "Dragonborn.esm", 0x0A1B2C };
+        mask.conditions = { c };
+
+        WorldSnapshot s;
+        CHECK(!AllMatch(mask, s));
+        s.wornItems.push_back(FormKey{ "Dragonborn.esm", 0x0A1B2C });
+        CHECK(AllMatch(mask, s));
+    }
+
     {  // ⚠ ONE DEFINITION OF THE THREE-STATE WORD, shared by the editable card
        // and the Rule Library row. The pack row's comment already said it used
        // "the same three-state word as an editable card" while spelling the

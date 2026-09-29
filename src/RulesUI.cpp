@@ -11,6 +11,7 @@
 #include "RuleModel.h"
 #include "Settings.h"  // castHoldSeconds, so the Casting help says the real number
 #include "RuleStore.h"
+#include "RealWorn.h"  // SnapshotRealWorn: the Worn Item picker lists what is on now
 #include "SlotMask.h"
 #include "StyleRef.h"
 #include "Tutorial.h"  // the page's anchors and its one action
@@ -139,6 +140,7 @@ namespace OS::RulesUI {
             { ConditionKind::kDialogue, "Talking" },
             { ConditionKind::kVampire, "Vampire" },
             { ConditionKind::kWornSlot, "Worn Slot" },
+            { ConditionKind::kWornItem, "Worn Item" },
             { ConditionKind::kAdvanced, "Advanced" },
         };
 
@@ -240,6 +242,37 @@ namespace OS::RulesUI {
             return (edid && *edid) ? edid : "(unnamed region)";
         }
 
+        // An ARMO's label: full name when it has one, editor id otherwise, and
+        // the owning plugin in brackets so two mods' "Iron Helmet" stay
+        // distinguishable in the picker. Shared by the chip, the panel and the
+        // picker cache so the three cannot disagree about what an item is
+        // called.
+        [[nodiscard]] std::string ItemLabel(RE::TESObjectARMO* a_armo,
+                                            const Rules::FormKey& a_key) {
+            std::string name;
+            if (const char* full = a_armo->GetFullName(); full && *full) {
+                name = full;
+            } else if (const char* ed = a_armo->GetFormEditorID(); ed && *ed) {
+                name = ed;
+            } else {
+                name = "(unnamed item)";
+            }
+            return name + " [" + a_key.modName + "]";
+        }
+
+        [[nodiscard]] std::string ItemDisplayName(const Rules::FormKey& a_key) {
+            if (a_key.Empty()) {
+                return "(not set)";
+            }
+            auto* dh   = RE::TESDataHandler::GetSingleton();
+            auto* armo = dh ? dh->LookupForm<RE::TESObjectARMO>(a_key.localFormID, a_key.modName)
+                            : nullptr;
+            if (!armo) {
+                return "(missing)";
+            }
+            return ItemLabel(armo, a_key);
+        }
+
         // "22:00 to 6:00" - matches the design doc's own example formatting
         // (no leading zero on a single-digit hour, always ":00"/":MM").
         [[nodiscard]] std::string FormatHour(float a_hour) {
@@ -298,6 +331,8 @@ namespace OS::RulesUI {
                     return "casting";
                 case ConditionKind::kWornSlot:
                     return "wearing " + SlotLabel(a_c.slotBit);
+                case ConditionKind::kWornItem:
+                    return "wearing " + ItemDisplayName(a_c.form);
                 case ConditionKind::kAdvanced:
                     return "advanced: " +
                            (a_c.advancedText.empty() ? std::string("(empty)") : a_c.advancedText);
@@ -850,6 +885,53 @@ namespace OS::RulesUI {
             g_regionCache.built = true;
         }
 
+        // ---- worn-item cache -------------------------------------------------
+        // Every NAMED armor form in the load order, sorted by label, built once
+        // lazily for the same reasons as g_regionCache (forms are fixed after
+        // kDataLoaded; `built` is only set once a live TESDataHandler answered).
+        // Nameless armors are skipped: they are template/skin/ARMA scaffolding
+        // (naked-body records, race skins) that a player would never pick and
+        // that would bury the real items in the filter list.
+        struct ItemCache {
+            bool                        built = false;
+            std::vector<std::string>    labels;
+            std::vector<Rules::FormKey> keys;
+        };
+        ItemCache g_itemCache;
+
+        void BuildItemCacheOnce() {
+            if (g_itemCache.built) {
+                return;
+            }
+            auto* dh = RE::TESDataHandler::GetSingleton();
+            if (!dh) {
+                return;
+            }
+            std::vector<std::pair<std::string, Rules::FormKey>> rows;
+            for (auto* armo : dh->GetFormArray<RE::TESObjectARMO>()) {
+                if (!armo) {
+                    continue;
+                }
+                const char* full = armo->GetFullName();
+                if (!full || !*full) {
+                    continue;
+                }
+                Rules::FormKey key;
+                if (!MakeFormKey(armo, key)) {
+                    continue;
+                }
+                rows.emplace_back(ItemLabel(armo, key), key);
+            }
+            std::ranges::sort(rows, [](const auto& a, const auto& b) { return a.first < b.first; });
+            g_itemCache.labels.reserve(rows.size());
+            g_itemCache.keys.reserve(rows.size());
+            for (auto& [label, key] : rows) {
+                g_itemCache.labels.push_back(std::move(label));
+                g_itemCache.keys.push_back(std::move(key));
+            }
+            g_itemCache.built = true;
+        }
+
         // ---- overlay popup ------------------------------------------------
         // ⚠⚠ THE OVERLAY POPUP IS OPENED ONE FRAME LATE, ON PURPOSE. Its only
         // entry point is "Other slots..." inside the "+ Effect" popup, and a
@@ -1223,6 +1305,82 @@ namespace OS::RulesUI {
                             }
                         });
                     }
+                    break;
+                }
+                case ConditionKind::kWornItem: {
+                    BuildItemCacheOnce();
+                    const auto& labels = g_itemCache.labels;
+                    const auto& keys   = g_itemCache.keys;
+                    int         current = -1;
+                    for (std::size_t i = 0; i < keys.size(); ++i) {
+                        if (keys[i] == a_c.form) {
+                            current = static_cast<int>(i);
+                            break;
+                        }
+                    }
+                    FUCK::TextUnformatted(("Currently: " + ItemDisplayName(a_c.form)).c_str());
+                    if (labels.empty()) {
+                        FUCK::TextDisabled("%s", "No named armor found in the loaded data.");
+                    } else {
+                        int sel = current;
+                        FUCK::SetNextItemWidth(OS::ui::FontSize() * 20.0f);
+                        // ComboWithFilter for the same reason as regions, only
+                        // worse: a modlist holds thousands of armors.
+                        if (FUCK::ComboWithFilter("##wornitem", &sel, labels) && sel != current &&
+                            sel >= 0 && sel < static_cast<int>(keys.size())) {
+                            const Rules::FormKey chosen = keys[static_cast<std::size_t>(sel)];
+                            MutateRule(a_ruleId, [&, chosen](Rule& r) {
+                                if (a_index < r.conditions.size()) {
+                                    r.conditions[a_index].form = chosen;
+                                }
+                            });
+                        }
+                    }
+                    // The quick path: most people know what they are wearing
+                    // better than what the record is called. An inline combo of
+                    // the distinct pieces on the character right now - not a
+                    // nested popup, because this panel is itself drawn inside
+                    // one and a popup opened from in there hashes against the
+                    // wrong id stack (see g_openOverlayForRule).
+                    {
+                        auto*      player  = RE::PlayerCharacter::GetSingleton();
+                        auto*      changes = player ? player->GetInventoryChanges() : nullptr;
+                        const auto real    = SnapshotRealWorn(changes);
+                        std::vector<std::string>    wornLabels;
+                        std::vector<Rules::FormKey> wornKeys;
+                        for (std::uint32_t bit = 0; bit < 32; ++bit) {
+                            auto* armo = real.armo[bit];
+                            bool  dup  = false;
+                            for (std::uint32_t prev = 0; prev < bit && !dup; ++prev) {
+                                dup = real.armo[prev] == armo;
+                            }
+                            Rules::FormKey key;
+                            if (!armo || dup || !MakeFormKey(armo, key)) {
+                                continue;
+                            }
+                            wornLabels.push_back(ItemLabel(armo, key));
+                            wornKeys.push_back(std::move(key));
+                        }
+                        FUCK::TextDisabled("%s", "Or pick from what you are wearing right now:");
+                        if (wornLabels.empty()) {
+                            FUCK::TextDisabled("%s", "You are not wearing anything.");
+                        } else {
+                            int wsel = -1;
+                            FUCK::SetNextItemWidth(OS::ui::FontSize() * 20.0f);
+                            if (FUCK::Combo("##wornnow", &wsel, wornLabels) && wsel >= 0 &&
+                                wsel < static_cast<int>(wornKeys.size())) {
+                                const Rules::FormKey chosen = wornKeys[static_cast<std::size_t>(wsel)];
+                                MutateRule(a_ruleId, [&, chosen](Rule& r) {
+                                    if (a_index < r.conditions.size()) {
+                                        r.conditions[a_index].form = chosen;
+                                    }
+                                });
+                            }
+                        }
+                    }
+                    FUCK::TextDisabled("%s",
+                                       "True while that exact item is equipped. Checks your real "
+                                       "gear, not the outfit shown over it.");
                     break;
                 }
                 case ConditionKind::kAdvanced: {
