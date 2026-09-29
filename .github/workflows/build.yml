@@ -1,0 +1,125 @@
+name: Build FittingRoom.dll
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    # Visual Studio 2026 (v18), the same major version upstream's
+    # CMakePresets.json and tools/build.bat are written against.
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 240
+    env:
+      VCPKG_ROOT: C:\vcpkg-fr
+      VCPKG_DISABLE_METRICS: "1"
+      VCPKG_BINARY_SOURCES: clear;files,C:\vcpkg-bincache,readwrite
+    steps:
+      - name: Checkout (with the CommonLibSSE-NG submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore vcpkg binary cache
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: C:\vcpkg-bincache
+          key: vcpkg-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/x64-windows-static-md.cmake') }}-${{ github.run_id }}
+          restore-keys: |
+            vcpkg-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/x64-windows-static-md.cmake') }}-
+
+      - name: Set up vcpkg
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force C:\vcpkg-bincache | Out-Null
+          git clone https://github.com/microsoft/vcpkg.git $env:VCPKG_ROOT
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Load the MSVC x64 environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Show toolchain
+        shell: pwsh
+        run: |
+          cl 2>&1 | Select-Object -First 1
+          cmake --version
+          $ninja = Get-Command ninja -ErrorAction SilentlyContinue
+          if (-not $ninja) { choco install ninja -y --no-progress; $ninja = Get-Command ninja }
+          "NINJA_EXE=$($ninja.Source)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          ninja --version
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          # The preset hard-codes the author's own Ninja path under
+          # ...\Visual Studio\18\Community; a -D on the command line wins.
+          cmake --preset release `
+            "-DCMAKE_MAKE_PROGRAM=$env:NINJA_EXE" `
+            "-DOUTPUT_FOLDER=${{ github.workspace }}\deploy" `
+            -DFR_BODY_STUDIO=ON
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Save vcpkg binary cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: C:\vcpkg-bincache
+          key: vcpkg-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/x64-windows-static-md.cmake') }}-${{ github.run_id }}
+
+      - name: Build
+        shell: pwsh
+        run: |
+          cmake --build build/release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run the rules test suites (these cover the Worn Item condition)
+        shell: pwsh
+        run: |
+          $failed = @()
+          foreach ($t in 'RuleModelTests', 'RuleCodecTests', 'RuleEngineTests') {
+            Write-Host "== $t"
+            & "build\release\$t.exe"
+            if ($LASTEXITCODE -ne 0) { $failed += $t }
+          }
+          if ($failed.Count) { Write-Error "Failed: $($failed -join ', ')"; exit 1 }
+
+      - name: Run every other upstream test suite (informational)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $bad = @()
+          Get-ChildItem build\release\*Tests.exe | ForEach-Object {
+            & $_.FullName *> $null
+            if ($LASTEXITCODE -ne 0) { $bad += $_.BaseName }
+          }
+          if ($bad.Count) { Write-Warning "Non-zero: $($bad -join ', ')"; exit 1 } else { Write-Host "All test suites passed." }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $dll = "deploy\SKSE\Plugins\FittingRoom.dll"
+          if (-not (Test-Path $dll)) { Write-Error "FittingRoom.dll missing from deploy"; exit 1 }
+          # An MO2-installable mod that carries ONLY the DLL, so it overrides the
+          # installed Fitting Room's DLL and leaves all of its data alone.
+          New-Item -ItemType Directory -Force "pkg\SKSE\Plugins" | Out-Null
+          Copy-Item $dll "pkg\SKSE\Plugins\"
+          Get-FileHash "pkg\SKSE\Plugins\FittingRoom.dll" -Algorithm SHA256 | Format-List
+          Get-Item "pkg\SKSE\Plugins\FittingRoom.dll" | Format-List Name, Length, LastWriteTime
+
+      - name: Upload the plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: FittingRoom-WornItem
+          path: pkg
+          if-no-files-found: error
+
+      - name: Upload debug symbols
+        uses: actions/upload-artifact@v4
+        with:
+          name: FittingRoom-pdb
+          path: build/release/FittingRoom.pdb
+          if-no-files-found: warn
