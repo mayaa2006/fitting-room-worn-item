@@ -43,13 +43,20 @@ jobs:
 
       - name: Fetch the build log
         run: |
-          job=$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID/jobs" --jq '.jobs[0].id')
-          gh api "repos/${{ github.repository }}/actions/jobs/$job/logs" > out/build-log.txt
-          sha=$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID" --jq '.head_sha')
+          set -x
+          api="https://api.github.com/repos/${{ github.repository }}"
+          job=$(curl -sSf -H "Authorization: Bearer $GH_TOKEN" "$api/actions/runs/$RUN_ID/jobs" | jq -r '.jobs[0].id')
+          # curl drops the Authorization header on the cross-host redirect to
+          # blob storage, which is what that storage requires.
+          curl -sSL -H "Authorization: Bearer $GH_TOKEN" "$api/actions/jobs/$job/logs" -o out/build-log.txt \
+            || echo "log fetch failed" > out/build-log.txt
+          ls -la out/build-log.txt
+          sha=$(curl -sSf -H "Authorization: Bearer $GH_TOKEN" "$api/actions/runs/$RUN_ID" | jq -r '.head_sha')
           {
             echo "run: $RUN_ID"
             echo "source commit: $sha"
-            sha256sum out/FittingRoom-WornItem/SKSE/Plugins/FittingRoom.dll
+            find out -type f | sort
+            sha256sum out/FittingRoom-WornItem/SKSE/Plugins/FittingRoom.dll || true
           } > out/BUILD-INFO.txt
           cat out/BUILD-INFO.txt
 
