@@ -130,6 +130,16 @@ namespace OS::Rules {
 
         // Set by the store for pack rules; empty for the save's own rules.
         std::string packName;
+
+        // Follower mirroring (addon). When THIS rule is the one that sets the
+        // player's base, every current follower who has an outfit of the same
+        // name in her own Fitting Room library switches to it too (or to her
+        // real gear, for a kRealGear base). Followers without a matching
+        // outfit are left alone. Only the base is mirrored, never the overlay:
+        // an overlay is a player-only concept in OutfitSession. Serialized as
+        // an optional "followers" key, so an unmodified build reading a rules
+        // file that carries it simply ignores it. See FollowerMirror.h.
+        bool followers{ false };
     };
 
     using RuleSet = std::vector<Rule>;  // already in merged evaluation order

@@ -76,11 +76,11 @@ jobs:
           cmake --build build/release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Run the rules test suites (these cover the Worn Item condition)
+      - name: Run the rules test suites (Worn Item + follower mirroring)
         shell: pwsh
         run: |
           $failed = @()
-          foreach ($t in 'RuleModelTests', 'RuleCodecTests', 'RuleEngineTests') {
+          foreach ($t in 'RuleModelTests', 'RuleCodecTests', 'RuleEngineTests', 'FollowerMirrorTests') {
             Write-Host "== $t"
             & "build\release\$t.exe"
             if ($LASTEXITCODE -ne 0) { $failed += $t }

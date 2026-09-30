@@ -1769,11 +1769,14 @@ namespace OS::RulesUI {
 
         [[nodiscard]] std::vector<EffectChip> BuildEffectChips(const Rule& a_rule) {
             std::vector<EffectChip> out;
+            // Follower mirroring (addon): said on the chip itself, so a card
+            // that dresses followers reads differently at a glance.
+            const std::string followersTail = a_rule.followers ? " + followers" : "";
             if (a_rule.base.kind == BaseKind::kRealGear) {
-                out.push_back({ EffectChip::Kind::kBase, 0, "Wear your real gear" });
+                out.push_back({ EffectChip::Kind::kBase, 0, "Wear your real gear" + followersTail });
             } else if (a_rule.base.kind == BaseKind::kOutfit) {
                 out.push_back({ EffectChip::Kind::kBase, 0,
-                                "Wear \"" + a_rule.base.outfitName + "\"" });
+                                "Wear \"" + a_rule.base.outfitName + "\"" + followersTail });
             }
             // kKeep contributes no chip at all: "keep the current look" is what a
             // rule does by saying nothing, and under additive composition that is
@@ -1895,14 +1898,34 @@ namespace OS::RulesUI {
                 return;
             }
             switch (a_chip.kind) {
-                case EffectChip::Kind::kBase:
+                case EffectChip::Kind::kBase: {
                     DrawOutfitChoices(a_ruleId, a_libNames, a_rule.base);
+                    FUCK::Separator();
+                    // Follower mirroring (addon). A checkbox rather than a
+                    // Selectable so ticking it does not close the popup, and
+                    // it lives on the OUTFIT chip because the outfit is the
+                    // only thing it mirrors.
+                    bool followers = a_rule.followers;
+                    if (FUCK::Checkbox("Also dress followers", &followers, false, false)) {
+                        MutateRule(a_ruleId, [followers](Rule& r) { r.followers = followers; });
+                    }
+                    if (FUCK::IsItemHovered()) {
+                        FUCK::SetTooltip(
+                            a_rule.base.kind == BaseKind::kRealGear
+                                ? "When this rule puts you in your real gear, followers you have\n"
+                                  "dressed in Fitting Room switch to their real gear too"
+                                : "When this rule dresses you, every follower who has an outfit\n"
+                                  "with this same name in Fitting Room switches to it too.\n"
+                                  "Followers without one are left as they are. Headgear and slot\n"
+                                  "changes stay yours only");
+                    }
                     FUCK::Separator();
                     if (FUCK::Selectable("Remove (keep the current look)")) {
                         SetBase(a_ruleId, Base{});  // kKeep
                         FUCK::CloseCurrentPopup();
                     }
                     break;
+                }
                 case EffectChip::Kind::kHeadgear: {
                     const auto current = HeadgearStateOf(a_rule.overlay);
                     if (FUCK::Selectable("Hide headgear", current == HeadgearState::kHidden)) {

@@ -2,6 +2,7 @@
 
 #include "PCH.h"
 
+#include "FollowerMirror.h"
 #include "NpcAssignments.h"
 #include "NpcResolve.h"
 #include "Outfit.h"
@@ -417,6 +418,18 @@ namespace OS {
         // own mutation methods never walk ProcessLists.
         void UpsertNpcLibrary(const NpcKey& a_key, OutfitLibrary a_library);
         void RemoveNpcAssignment(const NpcKey& a_key);
+
+        // Follower mirroring (addon, see FollowerMirror.h): make an ASSIGNED
+        // NPC's own active outfit match a_target, as one locked
+        // read-modify-write so it cannot interleave with another mutation of
+        // the same map. Returns what it did: kMissing when she has no
+        // assignment or no outfit of that name (nothing touched), kAlready
+        // when she already matches, kActivate/kDeactivate when it changed her
+        // selection - and only then is the render snapshot rebuilt. Like
+        // UpsertNpcLibrary it does NOT refresh the actor; the caller kicks
+        // RequestRefreshActor on a change.
+        FollowerMirror::Action MirrorNpcSelection(const NpcKey&                 a_key,
+                                                  const FollowerMirror::Target& a_target);
 
         // A consistent copy for the editor's target picker / draw loop.
         [[nodiscard]] NpcAssignmentMap SnapshotNpcAssignments() const;

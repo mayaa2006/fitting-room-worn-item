@@ -388,6 +388,34 @@ int main() {
             CHECK(back.conditions[2].negate);
         }
     }
+    {  // Follower mirroring (addon): "followers" round-trips, is written only
+       // when set (so an untouched rule's JSON is what an unmodified build
+       // writes), and a file without it - or with a non-bool - reads as off.
+        Rule r;
+        r.id              = "mirror";
+        r.base.kind       = BaseKind::kOutfit;
+        r.base.outfitName = "Town";
+
+        const auto plain = OS::RuleCodec::RuleToJson(r);
+        CHECK(!plain.isMember("followers"));
+        Rule backPlain;
+        CHECK(OS::RuleCodec::JsonToRule(plain, backPlain));
+        CHECK(!backPlain.followers);
+
+        r.followers        = true;
+        const auto flagged = OS::RuleCodec::RuleToJson(r);
+        CHECK(flagged["followers"].isBool() && flagged["followers"].asBool());
+        Rule back;
+        CHECK(OS::RuleCodec::JsonToRule(flagged, back));
+        CHECK(back.followers);
+        CHECK(back.base.outfitName == "Town");
+
+        Json::Value junk     = flagged;
+        junk["followers"]    = "yes";
+        Rule backJunk;
+        CHECK(OS::RuleCodec::JsonToRule(junk, backJunk));
+        CHECK(!backJunk.followers);
+    }
     {  // kWornItem carries its form under "item" and round-trips with negate.
         Rule r;
         r.id = "worn-item";

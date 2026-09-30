@@ -7,6 +7,7 @@
 #include "OverlayApi.h"        // RunNodePropertyPush: the layers a skin repaint took
 #include "OverlayReconcile.h"  // OS-233: Tick, the repair's armed check
 #include "RaceMenuMorphApi.h"  // RunPushUpProbe: does our key survive OBody
+#include "NpcIdentity.h"  // NpcKeyFor: follower mirroring
 #include "RealWorn.h"
 #include "RefreshGate.h"
 #include "RuleEngine.h"
@@ -20,6 +21,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <thread>
 #include <unordered_map>
@@ -799,6 +801,14 @@ namespace OS::WorldWatch {
 
         // ---- Application (the gated half) -----------------------------------
 
+        // Follower mirroring state (addon) - declared ahead of ApplyDecision,
+        // which records the base owner. Documented at SyncFollowers below.
+        std::string                                           g_baseRuleId;
+        Rules::Base                                           g_baseApplied;
+        std::optional<FollowerMirror::Target>                 g_mirror;
+        std::uint64_t                                         g_mirrorSerial = 0;
+        std::unordered_map<NpcKey, std::uint64_t, NpcKeyHash> g_mirrorSynced;
+
         // Latch so a steady deferral logs once rather than every heartbeat
         // (hazard 10, same reasoning as the kSuppressed/kPaused latches).
         std::string g_lastDeferReason;
@@ -853,6 +863,127 @@ namespace OS::WorldWatch {
             OutfitSession::RequestRefresh();
             LogApplySuccess(a_rules, a_decision);
             PushEngineState();  // lastAppliedRuleId just changed
+
+            // Follower mirroring: remember which rule now owns the player's
+            // base. A kKeep decision (the no-rule target, or an overlay-only
+            // change) leaves the base where it was, for the player and so for
+            // followers, so it does not move this either.
+            if (a_decision.base.kind != Rules::BaseKind::kKeep) {
+                g_baseRuleId = a_decision.ruleId;
+                g_baseApplied = a_decision.base;
+            }
+        }
+
+        // ---- Follower mirroring (addon) -------------------------------------
+        //
+        // See FollowerMirror.h for the feature. State, all main-thread only
+        // (Evaluate and the load/revert hooks below all run there):
+        //
+        //   g_baseRuleId/g_baseApplied - the rule that last set the player's
+        //     base, and that base. The mirror target is re-derived from these
+        //     against the CURRENT rule set on every evaluate, so ticking or
+        //     unticking "Also dress followers" on the rule already dressing
+        //     the player takes effect straight away rather than at the next
+        //     outfit change.
+        //   g_mirror/g_mirrorSerial - the current target, and a counter bumped
+        //     every time it changes.
+        //   g_mirrorSynced - per follower, the serial she was last brought in
+        //     line with. A follower is only touched when the target has moved
+        //     since then, so an outfit the user picks for her by hand in the
+        //     editor sticks until the next rule change instead of being undone
+        //     on the next heartbeat. One she has not been seen with yet (just
+        //     recruited, just loaded in) is synced on sight.
+
+        void ResetFollowerMirror() {
+            g_baseRuleId.clear();
+            g_baseApplied = Rules::Base{};
+            g_mirror.reset();
+            ++g_mirrorSerial;
+            g_mirrorSynced.clear();
+        }
+
+        void UpdateMirrorTarget(const Rules::RuleSet& a_rules) {
+            const Rules::Rule* rule = g_baseRuleId.empty() ? nullptr : FindRule(a_rules, g_baseRuleId);
+            // A rule that is switched off or deleted while its outfit is on
+            // stops steering followers too; the player keeps the outfit (kKeep
+            // semantics), and so do they.
+            if (rule && !rule->enabled) {
+                rule = nullptr;
+            }
+            auto target = FollowerMirror::TargetFor(rule, g_baseApplied);
+            if (target == g_mirror) {
+                return;
+            }
+            g_mirror = std::move(target);
+            ++g_mirrorSerial;
+            if (g_mirror) {
+                spdlog::info("rules: followers now follow {} (rule '{}')",
+                             g_mirror->realGear ? std::string("real gear")
+                                                : fmt::format("'{}'", g_mirror->outfitName),
+                             rule ? rule->name : g_baseRuleId);
+            } else {
+                spdlog::info("rules: followers are no longer steered by a rule");
+            }
+        }
+
+        void SyncFollowers() {
+            if (!g_mirror) {
+                return;
+            }
+            // The same "is it safe to redress anyone right now" test the
+            // player's apply path uses, plus two of its own: never while the
+            // editor is open in ANY view (it holds its own working copy of the
+            // targeted follower's library and writes it back whole), and never
+            // while the player has paused switching or turned it off.
+            if (!g_engineEnabled || g_engine.IsPinned() || g_editorOpen || !GateReason().empty()) {
+                return;
+            }
+            auto* processLists = RE::ProcessLists::GetSingleton();
+            if (!processLists) {
+                return;
+            }
+            auto&      session = OutfitSession::GetSingleton();
+            const auto target  = *g_mirror;
+            const auto serial  = g_mirrorSerial;
+            processLists->ForEachHighActor([&](RE::Actor* a_actor) -> RE::BSContainer::ForEachResult {
+                if (!a_actor || a_actor->IsDead() || !a_actor->IsPlayerTeammate()) {
+                    return RE::BSContainer::ForEachResult::kContinue;
+                }
+                auto* base = a_actor->GetActorBase();
+                if (!base || base->IsDynamicForm()) {
+                    return RE::BSContainer::ForEachResult::kContinue;
+                }
+                const auto key = NpcKeyFor(base);
+                if (!key) {
+                    return RE::BSContainer::ForEachResult::kContinue;
+                }
+                if (const auto it = g_mirrorSynced.find(*key);
+                    it != g_mirrorSynced.end() && it->second == serial) {
+                    return RE::BSContainer::ForEachResult::kContinue;  // already in line
+                }
+                switch (session.MirrorNpcSelection(*key, target)) {
+                    case FollowerMirror::Action::kMissing:
+                        // No outfit by that name (or never dressed here at
+                        // all): leave her be. Not marked synced, so creating
+                        // the outfit for her later takes effect without
+                        // waiting for the next rule change.
+                        break;
+                    case FollowerMirror::Action::kAlready:
+                        g_mirrorSynced[*key] = serial;
+                        break;
+                    case FollowerMirror::Action::kActivate:
+                    case FollowerMirror::Action::kDeactivate: {
+                        g_mirrorSynced[*key] = serial;
+                        OutfitSession::RequestRefreshActor(a_actor->GetHandle());
+                        const char* name = a_actor->GetName();
+                        spdlog::info("rules: follower '{}' -> {}", name ? name : "?",
+                                     target.realGear ? std::string("real gear")
+                                                     : fmt::format("'{}'", target.outfitName));
+                        break;
+                    }
+                }
+                return RE::BSContainer::ForEachResult::kContinue;
+            });
         }
 
         // ---- The evaluate-and-apply pass -------------------------------------
@@ -925,6 +1056,12 @@ namespace OS::WorldWatch {
                     ApplyDecision(rules, decision);
                     break;
             }
+
+            // Follower mirroring runs on EVERY evaluate, not just on kApply:
+            // the steady state is exactly when a newly recruited or newly
+            // loaded follower needs catching up.
+            UpdateMirrorTarget(rules);
+            SyncFollowers();
         }
 
         // review finding 2: coalescing latch, same shape as OutfitSession::
@@ -1325,6 +1462,7 @@ namespace OS::WorldWatch {
             g_pinnedLogged      = false;
             g_loggedMissingOutfit.clear();
             g_lastPushedAdvancedValidity.clear();
+            ResetFollowerMirror();  // per save, like everything else here
             // The cast latch belongs to the session that was running, not to
             // this one. A spell id left over from the previous save would have
             // PlayerIsCastingNow querying a form this save may not even have.
@@ -1361,6 +1499,7 @@ namespace OS::WorldWatch {
             g_lastAppliedRuleName.clear();
             g_loggedMissingOutfit.clear();
             g_lastPushedAdvancedValidity.clear();
+            ResetFollowerMirror();
             g_lastCastSpell.store(0, std::memory_order_relaxed);  // see OnSaveLoaded
             g_lastCastAt.store(-1.0e9, std::memory_order_relaxed);
             g_loadGate = RefreshGate::BlockingCooldown{};  // review finding 4

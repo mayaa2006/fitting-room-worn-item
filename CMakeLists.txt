@@ -427,6 +427,7 @@ add_commonlibsse_plugin(${PROJECT_NAME}
         src/SettingsUI.h
         src/SettingsUI.cpp
         src/RuleModel.h
+        src/FollowerMirror.h
         src/RuleEngine.h
         src/RuleEngine.cpp
         src/RuleCodec.h
@@ -1175,6 +1176,12 @@ target_include_directories(PresetTooltipTests PRIVATE src)
 add_executable(RuleModelTests tests/test_rulemodel.cpp)
 target_compile_features(RuleModelTests PRIVATE cxx_std_23)
 target_include_directories(RuleModelTests PRIVATE src)
+
+# Pure-logic follower mirroring tests (addon): which follower outfit a rule's
+# base maps to, and what that does to her library.
+add_executable(FollowerMirrorTests tests/test_followermirror.cpp)
+target_compile_features(FollowerMirrorTests PRIVATE cxx_std_23)
+target_include_directories(FollowerMirrorTests PRIVATE src)
 
 # Pure-logic rules decision-core tests (precedence, dwell, pin).
 add_executable(RuleEngineTests tests/test_ruleengine.cpp src/RuleEngine.cpp)

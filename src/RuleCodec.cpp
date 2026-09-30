@@ -134,6 +134,14 @@ namespace OS::RuleCodec {
         v["name"]     = a_rule.name;
         v["enabled"]  = a_rule.enabled;
         v["priority"] = a_rule.priority;
+        // Written only when set, so a file from a rule set that never used
+        // follower mirroring is byte-identical to what an unmodified build
+        // writes. Not a kRulesVersion bump for the same reason the overlay
+        // "show"/covered-"style" keys are not: an older reader ignores an
+        // unknown key and keeps the rule, where a bump would refuse the file.
+        if (a_rule.followers) {
+            v["followers"] = true;
+        }
 
         switch (a_rule.base.kind) {
         case BaseKind::kKeep:
@@ -267,6 +275,9 @@ namespace OS::RuleCodec {
         // crash the load.
         if (a_json["priority"].isInt()) {
             a_out.priority = a_json["priority"].asInt();
+        }
+        if (a_json["followers"].isBool()) {
+            a_out.followers = a_json["followers"].asBool();
         }
 
         const auto& base = a_json["base"];
