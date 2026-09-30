@@ -114,6 +114,12 @@ namespace OS::Persistence {
         // DecodeRuleState and RuleStore.h's EngineState for the two halves
         // of this record's shape.
         constexpr std::uint32_t kRecordRule = 'RULE';
+        // Follower mirroring (addon): which rule-steered outfit each follower
+        // was last brought in line with, so a reload does not re-dress the
+        // ones dressed by hand since. JSON in a blob, owned by WorldWatch.
+        // Its own record type so an unmodified build skips it: the load loop
+        // below drops any type it does not name before reading a byte.
+        constexpr std::uint32_t kRecordFollowerMirror = 'FMIR';
         // This save's CHARACTER DEFAULTS: the hair, eyes and brows a character
         // falls back to, and the body they do.
         //
@@ -172,6 +178,7 @@ namespace OS::Persistence {
         constexpr std::uint32_t kHairBaseVersion   = 1;
         constexpr std::uint32_t kHeadBaseVersion   = 1;
         constexpr std::uint32_t kRuleVersion = 1;
+        constexpr std::uint32_t kFollowerMirrorVersion = 1;
         constexpr std::uint32_t kOvlBaseVersion = 1;
         constexpr std::uint32_t kMkBaseVersion  = 1;
         constexpr std::uint32_t kSkinHoldVersion = 1;
@@ -746,6 +753,18 @@ namespace OS::Persistence {
                               "exception; rules NOT saved this time (previous co-save data "
                               "kept).");
             }
+
+            // Follower mirroring (addon). Written only when there is something
+            // to remember, so a save that never used it carries no new record.
+            try {
+                const auto json = WorldWatch::EncodeFollowerMirrorJson();
+                if (!json.empty()) {
+                    WriteRecord(a_intf, kRecordFollowerMirror, kFollowerMirrorVersion,
+                                EncodeOverlayBaseline(json), "follower mirror");
+                }
+            } catch (...) {
+                spdlog::error("Persistence: building the follower mirror record threw; not saved.");
+            }
         }
 
         void LoadCallback(SKSE::SerializationInterface* a_intf) {
@@ -804,7 +823,8 @@ namespace OS::Persistence {
                     type != kRecordDefBody && type != kRecordKnownAck &&
                     type != kRecordDyeAck && type != kRecordSkin &&
                     type != kRecordOvlBase && type != kRecordMkBase &&
-                    type != kRecordSkinHold && type != kRecordSex) {
+                    type != kRecordSkinHold && type != kRecordSex &&
+                    type != kRecordFollowerMirror) {
                     continue;
                 }
                 std::uint32_t len = 0;
@@ -1276,6 +1296,18 @@ namespace OS::Persistence {
                         const std::string name(reinterpret_cast<const char*>(bytes.data()),
                                                bytes.size());
                         OutfitSession::GetSingleton().ActivateByName(name);
+                    }
+                    continue;
+                }
+                if (type == kRecordFollowerMirror) {
+                    // EncodeOverlayBaseline/DecodeOverlayBaseline are a plain
+                    // length-checked string blob, reused as such.
+                    std::string json;
+                    if (version == kFollowerMirrorVersion && DecodeOverlayBaseline(bytes, json)) {
+                        WorldWatch::StageFollowerMirrorJson(json);
+                    } else {
+                        spdlog::warn("Persistence: refused follower mirror record (version {}).",
+                                     version);
                     }
                     continue;
                 }

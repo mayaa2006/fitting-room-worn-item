@@ -9,6 +9,7 @@
 // first design (a weather change during an open inventory never landed).
 // Application is what the gates hold back.
 
+#include "NpcAssignments.h"  // NpcKey: follower mirroring
 #include "RuleModel.h"
 
 #include <map>
@@ -17,6 +18,19 @@
 namespace OS::WorldWatch {
 
     void Init();          // register sinks; call once at kDataLoaded
+
+    // ---- Follower mirroring (addon, see FollowerMirror.h) -------------------
+    // The editor just committed a hand edit to this follower's library, so
+    // whatever she wears now is the user's choice and stays until the next
+    // rule change moves the mirror target. Any thread; queued to the main
+    // thread, where the rest of the mirror state lives.
+    void NotifyFollowerDressed(const NpcKey& a_key);
+    // Co-save half of the mirror's per-follower record ('FMIR'). Encode is
+    // called from SaveCallback and returns "" when there is nothing to write;
+    // Stage from LoadCallback, and OnSaveLoaded adopts what was staged. Both
+    // on the main thread, like the serialization callbacks themselves.
+    [[nodiscard]] std::string EncodeFollowerMirrorJson();
+    void                      StageFollowerMirrorJson(const std::string& a_json);
     void OnSaveLoaded();  // reset engine state, then evaluate
     void OnRevert();
 

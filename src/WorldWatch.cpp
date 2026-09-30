@@ -23,9 +23,13 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <thread>
 #include <unordered_map>
 #include <utility>
+#include <vector>
+
+#include <json/json.h>  // follower mirror co-save payload
 
 namespace OS::WorldWatch {
 
@@ -806,8 +810,9 @@ namespace OS::WorldWatch {
         std::string                                           g_baseRuleId;
         Rules::Base                                           g_baseApplied;
         std::optional<FollowerMirror::Target>                 g_mirror;
-        std::uint64_t                                         g_mirrorSerial = 0;
-        std::unordered_map<NpcKey, std::uint64_t, NpcKeyHash> g_mirrorSynced;
+        using MirrorSyncMap = std::unordered_map<NpcKey, FollowerMirror::Target, NpcKeyHash>;
+        MirrorSyncMap                                         g_mirrorSynced;
+        MirrorSyncMap                                         g_mirrorSyncedStaged;  // from 'FMIR', adopted at OnSaveLoaded
 
         // Latch so a steady deferral logs once rather than every heartbeat
         // (hazard 10, same reasoning as the kSuppressed/kPaused latches).
@@ -877,7 +882,8 @@ namespace OS::WorldWatch {
         // ---- Follower mirroring (addon) -------------------------------------
         //
         // See FollowerMirror.h for the feature. State, all main-thread only
-        // (Evaluate and the load/revert hooks below all run there):
+        // (Evaluate, the notifications below and the serialization hooks all
+        // run there):
         //
         //   g_baseRuleId/g_baseApplied - the rule that last set the player's
         //     base, and that base. The mirror target is re-derived from these
@@ -885,29 +891,29 @@ namespace OS::WorldWatch {
         //     unticking "Also dress followers" on the rule already dressing
         //     the player takes effect straight away rather than at the next
         //     outfit change.
-        //   g_mirror/g_mirrorSerial - the current target, and a counter bumped
-        //     every time it changes.
-        //   g_mirrorSynced - per follower, the serial she was last brought in
-        //     line with. A follower is only touched when the target has moved
-        //     since then, so an outfit the user picks for her by hand in the
-        //     editor sticks until the next rule change instead of being undone
-        //     on the next heartbeat. One she has not been seen with yet (just
-        //     recruited, just loaded in) is synced on sight.
+        //   g_mirror - the target followers should be wearing, or none.
+        //   g_mirrorSynced - per follower, the target she was last brought in
+        //     line with (or the one current when the user dressed her by
+        //     hand). She is only touched when the target differs from that, so
+        //     a hand-picked outfit sticks until a rule change instead of being
+        //     undone on the next heartbeat. One not seen yet (just recruited,
+        //     just loaded in) is synced on sight. Saved in the co-save ('FMIR')
+        //     so a reload does not re-dress everyone either.
 
         void ResetFollowerMirror() {
             g_baseRuleId.clear();
             g_baseApplied = Rules::Base{};
             g_mirror.reset();
-            ++g_mirrorSerial;
             g_mirrorSynced.clear();
         }
 
         void UpdateMirrorTarget(const Rules::RuleSet& a_rules) {
             const Rules::Rule* rule = g_baseRuleId.empty() ? nullptr : FindRule(a_rules, g_baseRuleId);
-            // A rule that is switched off or deleted while its outfit is on
-            // stops steering followers too; the player keeps the outfit (kKeep
-            // semantics), and so do they.
-            if (rule && !rule->enabled) {
+            // A rule that is switched off, deleted, or marked invalid (its
+            // outfit was deleted, say) while its outfit is on stops steering
+            // followers; the player keeps the outfit (kKeep semantics), and so
+            // do they.
+            if (rule && (!rule->enabled || rule->invalid)) {
                 rule = nullptr;
             }
             auto target = FollowerMirror::TargetFor(rule, g_baseApplied);
@@ -915,7 +921,6 @@ namespace OS::WorldWatch {
                 return;
             }
             g_mirror = std::move(target);
-            ++g_mirrorSerial;
             if (g_mirror) {
                 spdlog::info("rules: followers now follow {} (rule '{}')",
                              g_mirror->realGear ? std::string("real gear")
@@ -942,9 +947,17 @@ namespace OS::WorldWatch {
             if (!processLists) {
                 return;
             }
-            auto&      session = OutfitSession::GetSingleton();
-            const auto target  = *g_mirror;
-            const auto serial  = g_mirrorSerial;
+            const auto target = *g_mirror;
+
+            // Pass 1: every loaded, living teammate not already in line. Keyed
+            // by BASE, like the assignments themselves - two loaded actors can
+            // share one base (and so one library), and both need the refresh.
+            struct Seen {
+                NpcKey                     key;
+                std::vector<RE::ActorHandle> handles;
+                std::string                name;
+            };
+            std::vector<Seen> pending;
             processLists->ForEachHighActor([&](RE::Actor* a_actor) -> RE::BSContainer::ForEachResult {
                 if (!a_actor || a_actor->IsDead() || !a_actor->IsPlayerTeammate()) {
                     return RE::BSContainer::ForEachResult::kContinue;
@@ -953,15 +966,31 @@ namespace OS::WorldWatch {
                 if (!base || base->IsDynamicForm()) {
                     return RE::BSContainer::ForEachResult::kContinue;
                 }
-                const auto key = NpcKeyFor(base);
+                auto key = NpcKeyFor(base);
                 if (!key) {
                     return RE::BSContainer::ForEachResult::kContinue;
                 }
                 if (const auto it = g_mirrorSynced.find(*key);
-                    it != g_mirrorSynced.end() && it->second == serial) {
+                    it != g_mirrorSynced.end() && it->second == target) {
                     return RE::BSContainer::ForEachResult::kContinue;  // already in line
                 }
-                switch (session.MirrorNpcSelection(*key, target)) {
+                for (auto& p : pending) {
+                    if (p.key == *key) {
+                        p.handles.push_back(a_actor->GetHandle());
+                        return RE::BSContainer::ForEachResult::kContinue;
+                    }
+                }
+                const char* name = a_actor->GetName();
+                pending.push_back({ std::move(*key), { a_actor->GetHandle() }, name ? name : "?" });
+                return RE::BSContainer::ForEachResult::kContinue;
+            });
+
+            // Pass 2: outside the actor walk, one locked read-modify-write per
+            // follower, and a refresh for every loaded actor wearing a library
+            // that changed.
+            auto& session = OutfitSession::GetSingleton();
+            for (auto& p : pending) {
+                switch (session.MirrorNpcSelection(p.key, target)) {
                     case FollowerMirror::Action::kMissing:
                         // No outfit by that name (or never dressed here at
                         // all): leave her be. Not marked synced, so creating
@@ -969,23 +998,66 @@ namespace OS::WorldWatch {
                         // waiting for the next rule change.
                         break;
                     case FollowerMirror::Action::kAlready:
-                        g_mirrorSynced[*key] = serial;
+                        g_mirrorSynced[p.key] = target;
                         break;
                     case FollowerMirror::Action::kActivate:
-                    case FollowerMirror::Action::kDeactivate: {
-                        g_mirrorSynced[*key] = serial;
-                        OutfitSession::RequestRefreshActor(a_actor->GetHandle());
-                        const char* name = a_actor->GetName();
-                        spdlog::info("rules: follower '{}' -> {}", name ? name : "?",
+                    case FollowerMirror::Action::kDeactivate:
+                        g_mirrorSynced[p.key] = target;
+                        for (const auto& h : p.handles) {
+                            OutfitSession::RequestRefreshActor(h);
+                        }
+                        spdlog::info("rules: follower '{}' -> {}", p.name,
                                      target.realGear ? std::string("real gear")
                                                      : fmt::format("'{}'", target.outfitName));
                         break;
-                    }
                 }
-                return RE::BSContainer::ForEachResult::kContinue;
-            });
+            }
         }
 
+        // 'FMIR' payload: {"v":1,"followers":[{"mod","id","real","outfit"}]}.
+        // JSON so a future field is an ignorable key rather than a format bump.
+        std::string EncodeMirrorMap(const MirrorSyncMap& a_map) {
+            if (a_map.empty()) {
+                return {};
+            }
+            Json::Value root(Json::objectValue);
+            root["v"] = 1;
+            Json::Value arr(Json::arrayValue);
+            for (const auto& [key, t] : a_map) {
+                Json::Value e(Json::objectValue);
+                e["mod"]    = key.modName;
+                e["id"]     = key.localFormID;
+                e["real"]   = t.realGear;
+                e["outfit"] = t.outfitName;
+                arr.append(e);
+            }
+            root["followers"] = arr;
+            Json::StreamWriterBuilder wb;
+            wb["indentation"] = "";
+            return Json::writeString(wb, root);
+        }
+
+        MirrorSyncMap DecodeMirrorMap(const std::string& a_json) {
+            MirrorSyncMap out;
+            Json::Value   root;
+            Json::CharReaderBuilder rb;
+            std::string             err;
+            std::istringstream      in(a_json);
+            if (!Json::parseFromStream(rb, in, &root, &err) || !root.isObject() ||
+                !root["followers"].isArray()) {
+                spdlog::warn("rules: follower mirror record unreadable ({}); starting fresh", err);
+                return out;
+            }
+            for (const auto& e : root["followers"]) {
+                if (!e.isObject() || !e["mod"].isString() || !e["id"].isUInt() ||
+                    !e["real"].isBool() || !e["outfit"].isString()) {
+                    continue;
+                }
+                out[NpcKey{ e["mod"].asString(), e["id"].asUInt() }] =
+                    FollowerMirror::Target{ e["real"].asBool(), e["outfit"].asString() };
+            }
+            return out;
+        }
         // ---- The evaluate-and-apply pass -------------------------------------
 
         void Evaluate() {
@@ -1463,6 +1535,12 @@ namespace OS::WorldWatch {
             g_loggedMissingOutfit.clear();
             g_lastPushedAdvancedValidity.clear();
             ResetFollowerMirror();  // per save, like everything else here
+            // ...then adopt what this save's 'FMIR' record said (staged by
+            // Persistence's LoadCallback, which runs before this), so the
+            // first evaluate after a load does not re-dress followers the
+            // user had dressed by hand.
+            g_mirrorSynced = std::move(g_mirrorSyncedStaged);
+            g_mirrorSyncedStaged.clear();
             // The cast latch belongs to the session that was running, not to
             // this one. A spell id left over from the previous save would have
             // PlayerIsCastingNow querying a form this save may not even have.
@@ -1500,6 +1578,7 @@ namespace OS::WorldWatch {
             g_loggedMissingOutfit.clear();
             g_lastPushedAdvancedValidity.clear();
             ResetFollowerMirror();
+            g_mirrorSyncedStaged.clear();  // revert precedes the next load's staging
             g_lastCastSpell.store(0, std::memory_order_relaxed);  // see OnSaveLoaded
             g_lastCastAt.store(-1.0e9, std::memory_order_relaxed);
             g_loadGate = RefreshGate::BlockingCooldown{};  // review finding 4
@@ -1674,6 +1753,11 @@ namespace OS::WorldWatch {
             task->AddTask([name] {
                 SafeRun("NotifyManualPick", [name] {
                     NoteEditorTouchedOutfits();
+                    // Follower mirroring: the player's base is hand-picked now,
+                    // not rule-owned, so no rule is steering followers any
+                    // more. The next rule that applies a base re-arms it.
+                    g_baseRuleId.clear();
+                    g_baseApplied = Rules::Base{};
                     g_engine.SetPinned(name);
                     g_pinnedNameMirror  = name;
                     g_pinnedLogged      = false;  // a fresh pin should log again
@@ -1690,6 +1774,31 @@ namespace OS::WorldWatch {
                 });
             });
         }
+    }
+
+    void NotifyFollowerDressed(const NpcKey& a_key) {
+        if (auto* task = SKSE::GetTaskInterface()) {
+            task->AddTask([a_key] {
+                SafeRun("NotifyFollowerDressed", [&a_key] {
+                    // Marked against the CURRENT target: she keeps her own look
+                    // until the target moves. With no target there is nothing
+                    // to protect her from, and the next target should reach her.
+                    if (g_mirror) {
+                        g_mirrorSynced[a_key] = *g_mirror;
+                    } else {
+                        g_mirrorSynced.erase(a_key);
+                    }
+                });
+            });
+        }
+    }
+
+    std::string EncodeFollowerMirrorJson() { return EncodeMirrorMap(g_mirrorSynced); }
+
+    void StageFollowerMirrorJson(const std::string& a_json) {
+        g_mirrorSyncedStaged = DecodeMirrorMap(a_json);
+        spdlog::info("rules: follower mirror record loaded ({} follower(s))",
+                     g_mirrorSyncedStaged.size());
     }
 
     void NotifyOutfitRenamed(std::string_view a_from, std::string_view a_to) {

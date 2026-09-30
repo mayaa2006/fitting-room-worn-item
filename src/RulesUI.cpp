@@ -1922,6 +1922,12 @@ namespace OS::RulesUI {
                     FUCK::Separator();
                     if (FUCK::Selectable("Remove (keep the current look)")) {
                         SetBase(a_ruleId, Base{});  // kKeep
+                        // The follower tick belongs to the outfit being
+                        // removed; left set it would silently come back on
+                        // with the next outfit picked for this rule.
+                        if (a_rule.followers) {
+                            MutateRule(a_ruleId, [](Rule& r) { r.followers = false; });
+                        }
                         FUCK::CloseCurrentPopup();
                     }
                     break;

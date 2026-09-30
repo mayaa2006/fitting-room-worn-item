@@ -4351,6 +4351,9 @@ namespace OS::EditorUI {
                 std::forward<Fn>(a_fn)(g_targetLibrary);
                 if (g_target.npc) {
                     a_session.UpsertNpcLibrary(*g_target.npc, g_targetLibrary);
+                    // Follower mirroring (addon): a hand edit - her look is
+                    // hers until the next rule change.
+                    WorldWatch::NotifyFollowerDressed(*g_target.npc);
                 }
             }
         }
@@ -22107,6 +22110,7 @@ namespace OS::EditorUI {
                 }
                 if (g_target.npc) {
                     session.UpsertNpcLibrary(*g_target.npc, g_targetLibrary);
+                    WorldWatch::NotifyFollowerDressed(*g_target.npc);  // follower mirroring: see above
                 }
                 session.RequestRefreshActor(g_target.handle);
                 BeginStagingCurrent(session, g_staged);  // keep editing
