@@ -810,6 +810,11 @@ namespace OS::WorldWatch {
         std::string                                           g_baseRuleId;
         Rules::Base                                           g_baseApplied;
         std::optional<FollowerMirror::Target>                 g_mirror;
+        // The last NON-empty target. A player hand-pick empties g_mirror until
+        // a rule re-applies, and a follower dressed by hand in that gap must be
+        // stamped against the target that is about to come back, or it would
+        // re-dress her the moment it does.
+        std::optional<FollowerMirror::Target>                 g_lastMirror;
         using MirrorSyncMap = std::unordered_map<NpcKey, FollowerMirror::Target, NpcKeyHash>;
         MirrorSyncMap                                         g_mirrorSynced;
         MirrorSyncMap                                         g_mirrorSyncedStaged;  // from 'FMIR', adopted at OnSaveLoaded
@@ -904,6 +909,7 @@ namespace OS::WorldWatch {
             g_baseRuleId.clear();
             g_baseApplied = Rules::Base{};
             g_mirror.reset();
+            g_lastMirror.reset();
             g_mirrorSynced.clear();
         }
 
@@ -922,6 +928,7 @@ namespace OS::WorldWatch {
             }
             g_mirror = std::move(target);
             if (g_mirror) {
+                g_lastMirror = g_mirror;
                 spdlog::info("rules: followers now follow {} (rule '{}')",
                              g_mirror->realGear ? std::string("real gear")
                                                 : fmt::format("'{}'", g_mirror->outfitName),
@@ -1780,11 +1787,13 @@ namespace OS::WorldWatch {
         if (auto* task = SKSE::GetTaskInterface()) {
             task->AddTask([a_key] {
                 SafeRun("NotifyFollowerDressed", [&a_key] {
-                    // Marked against the CURRENT target: she keeps her own look
-                    // until the target moves. With no target there is nothing
-                    // to protect her from, and the next target should reach her.
-                    if (g_mirror) {
-                        g_mirrorSynced[a_key] = *g_mirror;
+                    // Marked against the current target (or, in a gap where
+                    // none is set, the last one): she keeps her own look until
+                    // the target moves to something else. With no target ever
+                    // set there is nothing to protect her from.
+                    const auto& t = g_mirror ? g_mirror : g_lastMirror;
+                    if (t) {
+                        g_mirrorSynced[a_key] = *t;
                     } else {
                         g_mirrorSynced.erase(a_key);
                     }
