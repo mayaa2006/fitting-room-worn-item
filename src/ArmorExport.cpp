@@ -156,7 +156,10 @@ namespace OS::ArmorExport {
             return (m && *m) ? std::string(m) : std::string{};
         }
 
-        constexpr const char* kMarkerFile = "FittingRoomExport.txt";
+        // Written into the mesh folder when an export starts and removed when
+        // it finishes: a folder still holding it is what a failed or
+        // interrupted export left behind, and the only kind ever cleared.
+        constexpr const char* kInProgressFile = "FittingRoomExport.inprogress";
 
         std::vector<std::uint8_t> ArchiveBytes(const std::string& a_path) {
             RE::BSResourceNiBinaryStream stream{ a_path.c_str() };
@@ -369,7 +372,8 @@ namespace OS::ArmorExport {
             job->pluginName = M::SafeName(M::PluginStem(a_req.pluginName), 48, "Fitting Room Armor");
             // Short on purpose: it is a folder in every exported path, and
             // MO2 / Wabbajack installs already eat much of Windows' 260.
-            job->stem       = M::SafeStem(job->pluginName, 24, "Outfit");
+            job->stem       = M::SafeStem(job->pluginName, 16, "Outfit") + "_" +
+                        M::HashHex(job->pluginName).substr(0, 6);
             job->recipe     = a_req.recipe;
 
             auto* player = RE::PlayerCharacter::GetSingleton();
@@ -392,9 +396,6 @@ namespace OS::ArmorExport {
             }
             {
                 // Never overwrite an earlier export: its items may be in saves.
-                // A finished export always has its .esp and a marker file in
-                // its mesh folder; folders WITHOUT the marker are what a failed
-                // or interrupted export left behind, and are cleared.
                 std::error_code ec;
                 const auto meshDir = fs::path("Data\\meshes\\FittingRoom\\Armor") / job->stem;
                 const auto texDir  = fs::path("Data\\textures\\FittingRoom\\Armor") / job->stem;
@@ -402,13 +403,15 @@ namespace OS::ArmorExport {
                     Finish(false, "\"" + job->pluginName + ".esp\" already exists. Pick a new plugin name.");
                     return;
                 }
-                if (fs::exists(meshDir / kMarkerFile, ec)) {
-                    Finish(false, "An earlier export already uses the folder \"" + job->stem +
-                                      "\". Pick a more different plugin name.");
+                if (fs::exists(meshDir / kInProgressFile, ec)) {
+                    // Left by a failed or interrupted run of this same name.
+                    fs::remove_all(meshDir, ec);
+                    fs::remove_all(texDir, ec);
+                } else if (fs::exists(meshDir, ec) || fs::exists(texDir, ec)) {
+                    Finish(false, "Files from an earlier export with this name are still in Data (\"" +
+                                      job->stem + "\"). Pick a new plugin name.");
                     return;
                 }
-                fs::remove_all(meshDir, ec);
-                fs::remove_all(texDir, ec);
             }
             const auto sex = base->GetSex() == RE::SEX::kFemale ? RE::SEX::kFemale : RE::SEX::kMale;
 
@@ -726,6 +729,13 @@ namespace OS::ArmorExport {
 
         void Worker(std::shared_ptr<Job> a_job) {
             auto& job = *a_job;
+            {
+                std::error_code ec;
+                const auto      meshDir = fs::path("Data\\meshes\\FittingRoom\\Armor") / job.stem;
+                fs::create_directories(meshDir, ec);
+                std::ofstream mark(meshDir / kInProgressFile);
+                mark << job.pluginName << ".esp\n";
+            }
             try {
                 // 1. Textures, one at a time: read back on the render thread,
                 // compress and write here, free, next.
@@ -736,9 +746,7 @@ namespace OS::ArmorExport {
                     ++n;
                     const auto of = std::to_string(n) + " of " + std::to_string(job.bakes.size());
                     SetStatus("Copying dyed texture " + of + "...");
-                    SetCopying(true);
                     b.read = RequestReadback(b);
-                    SetCopying(false);
                     std::string err;
                     if (!b.read) {
                         failed.insert(b.nifPath);
@@ -764,6 +772,7 @@ namespace OS::ArmorExport {
                         task->AddTask([h = std::move(held)]() mutable { h.clear(); });
                     }
                 }
+                SetCopying(false);
                 // A mesh must never name a texture that was not written: drop
                 // those slots, so they keep the original (undyed) texture.
                 if (!failed.empty()) {
@@ -940,8 +949,8 @@ namespace OS::ArmorExport {
                 }
 
                 {
-                    std::ofstream marker(fs::path("Data\\meshes\\FittingRoom\\Armor") / job.stem / kMarkerFile);
-                    marker << espName << "\n";
+                    std::error_code ec;
+                    fs::remove(fs::path("Data\\meshes\\FittingRoom\\Armor") / job.stem / kInProgressFile, ec);
                 }
                 std::string msg = "Made " + std::to_string(written) + " item" + (written == 1 ? "" : "s") +
                                   " in \"" + espName + "\". Enable it in your mod manager's plugin list and "
