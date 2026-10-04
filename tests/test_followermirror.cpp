@@ -101,6 +101,76 @@ int main() {
         CHECK(!(Target{ true, {} } == Target{ false, {} }));
     }
 
+    {  // SyncStep: the scenarios from the 2026-10-04 bug hunt.
+        auto lib = [] {
+            OutfitLibrary l;
+            l.Create("Housecarl");  // 0 - her own
+            l.Create("Town");       // 1
+            l.Activate(0);
+            return l;
+        };
+        const Target town{ false, "Town" };
+        const Target dungeon{ false, "Dungeon" };  // she has none
+        const Target real{ true, {} };
+
+        // Real gear, then a rule she has no outfit for: back to Housecarl,
+        // not stuck in real gear.
+        {
+            auto           l = lib();
+            FollowerRecord r;
+            CHECK(SyncStep(l, r, real) == SyncResult::kChanged);
+            CHECK(l.ActiveIndex() == -1);
+            CHECK(r.mirrored && r.own == (Target{ false, "Housecarl" }));
+            CHECK(SyncStep(l, r, dungeon) == SyncResult::kRestored);
+            CHECK(l.ActiveIndex() == 0);
+            CHECK(!r.mirrored);
+            CHECK(r.synced == dungeon);
+        }
+        // Town -> Dungeon -> Town: she follows, goes home in between, follows again.
+        {
+            auto           l = lib();
+            FollowerRecord r;
+            CHECK(SyncStep(l, r, town) == SyncResult::kChanged && l.ActiveIndex() == 1);
+            CHECK(SyncStep(l, r, dungeon) == SyncResult::kRestored && l.ActiveIndex() == 0);
+            CHECK(SyncStep(l, r, town) == SyncResult::kChanged && l.ActiveIndex() == 1);
+            CHECK(r.own == (Target{ false, "Housecarl" }));  // remembered across the round trip
+        }
+        // A hand pick under Town survives a target she lacks, but the NEXT
+        // change to a target she has re-dresses her.
+        {
+            auto           l = lib();
+            FollowerRecord r;
+            SyncStep(l, r, town);
+            l.Activate(0);  // user dresses her in Housecarl by hand...
+            r.mirrored = false;
+            r.synced   = town;  // ...which NotifyFollowerDressed records
+            CHECK(SyncStep(l, r, dungeon) == SyncResult::kNoChange);
+            CHECK(l.ActiveIndex() == 0);           // hand pick kept
+            CHECK(r.synced == dungeon);            // but the target has moved on
+            CHECK(SyncStep(l, r, town) == SyncResult::kChanged && l.ActiveIndex() == 1);
+        }
+        // Already wearing the target: nothing to do, and she is not marked as
+        // mirror-dressed (her look is still her own).
+        {
+            auto l = lib();
+            l.Activate(1);
+            FollowerRecord r;
+            CHECK(SyncStep(l, r, town) == SyncResult::kNoChange);
+            CHECK(!r.mirrored);
+        }
+        // Her own outfit was deleted meanwhile: restoring finds nothing and
+        // leaves her as she is rather than stripping her.
+        {
+            auto           l = lib();
+            FollowerRecord r;
+            SyncStep(l, r, town);
+            l.Remove(0);  // Housecarl gone; Town is now index 0 and active
+            CHECK(l.ActiveIndex() == 0);
+            CHECK(SyncStep(l, r, dungeon) == SyncResult::kNoChange);
+            CHECK(l.ActiveIndex() == 0);
+        }
+    }
+
     if (g_failures == 0) {
         std::printf("all FollowerMirror tests passed\n");
         return 0;

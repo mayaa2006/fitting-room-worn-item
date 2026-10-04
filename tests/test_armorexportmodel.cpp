@@ -57,6 +57,15 @@ int main() {
         CHECK(SafeStem("My Outfit", 40, "X") == "My_Outfit");
         CHECK(EditorIdPart("Iron & Steel 2", 32) == "IronSteel2");
         CHECK(EditorIdPart("!!", 32) == "Piece");
+        CHECK(PluginStem("My Armor.esp") == "My Armor");
+        CHECK(PluginStem("My Armor.ESL ") == "My Armor");
+        CHECK(PluginStem("My Armor") == "My Armor");
+        CHECK(HashHex("abc") == HashHex("abc") && HashHex("abc") != HashHex("abd"));
+        CHECK(HashHex("").size() == 16);
+        const auto cf = CopiedTextureFileName("armor\\some\\very\\deep\\folder\\IronCuirass_n.dds");
+        CHECK(cf.size() < 64);
+        CHECK(cf.ends_with("_IronCuirass_n.dds"));
+        CHECK(CopiedTextureFileName("a\\x.dds") != CopiedTextureFileName("b\\x.dds"));
     }
     {  // The four items.
         CHECK(BucketFor(kBodyBit) == Bucket::kTorso);

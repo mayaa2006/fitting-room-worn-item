@@ -25,8 +25,17 @@ namespace OS::NifExport {
             }
             std::string        buf(reinterpret_cast<const char*>(a_bytes.data()), a_bytes.size());
             std::istringstream in(buf, std::ios::in | std::ios::binary);
-            if (a_nif.Load(in) != 0 || !a_nif.IsValid()) {
-                a_err = "not a NIF nifly can read";
+            // ⚠ nifly THROWS on some malformed input (std::length_error
+            // "Block index is too high", found by fuzzing) instead of returning
+            // an error. One broken mesh in someone's mod must cost one piece,
+            // not the whole export, so every entry point below also catches.
+            try {
+                if (a_nif.Load(in) != 0 || !a_nif.IsValid()) {
+                    a_err = "not a NIF nifly can read";
+                    return false;
+                }
+            } catch (const std::exception& e) {
+                a_err = std::string("unreadable NIF (") + e.what() + ")";
                 return false;
             }
             return true;
@@ -120,7 +129,7 @@ namespace OS::NifExport {
         }
     }
 
-    Result Rewrite(const std::vector<std::uint8_t>&          a_nif,
+    Result RewriteImpl(const std::vector<std::uint8_t>&          a_nif,
                    const std::vector<ShapeEdit>&             a_edits,
                    const std::map<std::string, std::string>& a_remap) {
         Result  r;
@@ -222,7 +231,7 @@ namespace OS::NifExport {
         return r;
     }
 
-    Result Merge(const std::vector<std::vector<std::uint8_t>>& a_nifs) {
+    Result MergeImpl(const std::vector<std::vector<std::uint8_t>>& a_nifs) {
         Result r;
         if (a_nifs.empty()) {
             r.error = "nothing to merge";
@@ -253,6 +262,23 @@ namespace OS::NifExport {
             if (!LoadBytes(src, a_nifs[i], err)) {
                 r.error = "model " + std::to_string(i + 1) + ": " + err;
                 return r;
+            }
+            // Root extra data (a BODYTRI morph link, an SMP physics path) is
+            // per FILE and only the base's survives: say so, do not hide it.
+            // Only the links that matter count: BODYTRI (body sliders) and
+            // HDT/SMP physics. BSXFlags and the like are on nearly every root.
+            if (auto* root = src.GetRootNode()) {
+                for (auto& ref : root->extraDataRefs) {
+                    auto* xd = src.GetHeader().GetBlock<NiExtraData>(ref);
+                    if (!xd) {
+                        continue;
+                    }
+                    const std::string n = xd->name.get();
+                    if (n == "BODYTRI" || n.rfind("HDT", 0) == 0) {
+                        ++r.droppedExtra;
+                        break;
+                    }
+                }
             }
             for (auto* s : ShapesInOrder(src)) {
                 std::string name = s->name.get();
@@ -327,7 +353,7 @@ namespace OS::NifExport {
         }
     }
 
-    std::vector<std::string> LocalizableTextures(const std::vector<std::uint8_t>& a_nif) {
+    std::vector<std::string> LocalizableTexturesImpl(const std::vector<std::uint8_t>& a_nif) {
         NifFile                  nif;
         std::string              err;
         std::vector<std::string> out;
@@ -344,7 +370,7 @@ namespace OS::NifExport {
         return out;
     }
 
-    Result Localize(const std::vector<std::uint8_t>& a_nif, const std::map<std::string, std::string>& a_map) {
+    Result LocalizeImpl(const std::vector<std::uint8_t>& a_nif, const std::map<std::string, std::string>& a_map) {
         Result  r;
         NifFile nif;
         if (!LoadBytes(nif, a_nif, r.error)) {
@@ -365,7 +391,7 @@ namespace OS::NifExport {
         return r;
     }
 
-    std::vector<std::string> ShapeNames(const std::vector<std::uint8_t>& a_nif) {
+    std::vector<std::string> ShapeNamesImpl(const std::vector<std::uint8_t>& a_nif) {
         NifFile     nif;
         std::string err;
         std::vector<std::string> out;
@@ -378,7 +404,7 @@ namespace OS::NifExport {
         return out;
     }
 
-    std::vector<std::string> TexturePaths(const std::vector<std::uint8_t>& a_nif, int a_order) {
+    std::vector<std::string> TexturePathsImpl(const std::vector<std::uint8_t>& a_nif, int a_order) {
         NifFile     nif;
         std::string err;
         std::vector<std::string> out;
@@ -399,6 +425,53 @@ namespace OS::NifExport {
             }
         }
         return out;
+    }
+
+    // ---- public entry points: nothing nifly throws gets past these ----------
+
+    namespace {
+        template <class Fn>
+        Result Guard(Fn&& a_fn) {
+            try {
+                return a_fn();
+            } catch (const std::exception& e) {
+                Result r;
+                r.error = std::string("NIF error: ") + e.what();
+                return r;
+            } catch (...) {
+                Result r;
+                r.error = "NIF error";
+                return r;
+            }
+        }
+        template <class Fn>
+        std::vector<std::string> GuardList(Fn&& a_fn) {
+            try {
+                return a_fn();
+            } catch (...) {
+                return {};
+            }
+        }
+    }
+
+    Result Rewrite(const std::vector<std::uint8_t>& a_nif, const std::vector<ShapeEdit>& a_edits,
+                   const std::map<std::string, std::string>& a_remap) {
+        return Guard([&] { return RewriteImpl(a_nif, a_edits, a_remap); });
+    }
+    Result Merge(const std::vector<std::vector<std::uint8_t>>& a_nifs) {
+        return Guard([&] { return MergeImpl(a_nifs); });
+    }
+    Result Localize(const std::vector<std::uint8_t>& a_nif, const std::map<std::string, std::string>& a_map) {
+        return Guard([&] { return LocalizeImpl(a_nif, a_map); });
+    }
+    std::vector<std::string> LocalizableTextures(const std::vector<std::uint8_t>& a_nif) {
+        return GuardList([&] { return LocalizableTexturesImpl(a_nif); });
+    }
+    std::vector<std::string> ShapeNames(const std::vector<std::uint8_t>& a_nif) {
+        return GuardList([&] { return ShapeNamesImpl(a_nif); });
+    }
+    std::vector<std::string> TexturePaths(const std::vector<std::uint8_t>& a_nif, int a_order) {
+        return GuardList([&] { return TexturePathsImpl(a_nif, a_order); });
     }
 
 }  // namespace OS::NifExport

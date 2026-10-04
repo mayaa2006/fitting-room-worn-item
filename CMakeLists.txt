@@ -107,6 +107,25 @@ find_package(safetyhook CONFIG REQUIRED)
 # Studio is built on, pinned as a submodule (extern/nifly). Its own tests stay
 # out (they only build when nifly is the top-level project). The preset's
 # /we4062 is this mod's rule, not nifly's, same reasoning as CommonLibSSE.
+# ⚠ ONE-LINE PATCH TO nifly, applied here so the pinned submodule stays
+# pristine in git. nifly's TrimTexturePaths runs recursive std::regex passes on
+# every texture path at load; a corrupted string length makes a "path"
+# megabytes long and the recursion overflows the stack, which no try/catch can
+# stop - in game, a crash. Found by fuzzing NifExport (2026-10-04). Real paths
+# are a few hundred characters, so anything over 1024 is skipped. Matched on a
+# single line so a CRLF checkout (Git for Windows) still finds it; idempotent.
+set(_fr_nifly_file "${CMAKE_CURRENT_SOURCE_DIR}/extern/nifly/src/NifFile.cpp")
+file(READ "${_fr_nifly_file}" _fr_nifly_text)
+if(NOT _fr_nifly_text MATCHES "FR-PATCH")
+    string(REPLACE "trim_whitespace(tex);"
+                   "if (tex.size() > 1024) return tex; /* FR-PATCH: see Fitting Room CMakeLists */ trim_whitespace(tex);"
+                   _fr_nifly_patched "${_fr_nifly_text}")
+    if(_fr_nifly_patched STREQUAL _fr_nifly_text)
+        message(FATAL_ERROR "nifly patch anchor 'trim_whitespace(tex);' not found - re-check the patch after updating nifly")
+    endif()
+    file(WRITE "${_fr_nifly_file}" "${_fr_nifly_patched}")
+    message(STATUS "FittingRoom: applied the nifly texture-path length cap")
+endif()
 add_subdirectory(extern/nifly EXCLUDE_FROM_ALL)
 if(MSVC)
     target_compile_options(nifly PRIVATE /wd4062 /W3)

@@ -29,7 +29,13 @@ namespace OS::ArmorExportUI {
         for (const auto& it : g_plan.items) {
             g_settings.push_back(it.defaults);
         }
-        g_pluginName = M::SafeName("FR Armor - " + a_outfit.name, 48, "Fitting Room Armor");
+        // An outfit name in a non-Latin script sanitizes to nothing; fall back
+        // to a name that is still unique per outfit.
+        auto readable = M::SafeName(a_outfit.name, 32, "");
+        if (readable.empty()) {
+            readable = "Outfit " + M::HashHex(a_outfit.name).substr(0, 6);
+        }
+        g_pluginName = M::SafeName("FR Armor - " + readable, 48, "Fitting Room Armor");
         // A finished status from an earlier export is cleared on reopen.
         if (!ArmorExport::GetStatus().busy) {
             ArmorExport::Acknowledge();
@@ -134,8 +140,15 @@ namespace OS::ArmorExportUI {
         // Never disabled: a long export (big textures compress slowly) keeps
         // running in the background, and its result is in the log and shown
         // here again when the window is reopened.
-        const char* closeLabel = status.busy ? "Close (keeps working)" : (status.finished ? "Done" : "Cancel");
-        if (ChamferPanel::Button(closeLabel).clicked) {
+        // Disabled only while dyed textures are being copied off the GPU, which
+        // needs the editor's render hook (a few frames per texture).
+        const char* closeLabel = status.copying ? "Copying textures..."
+                                 : status.busy  ? "Close (keeps working)"
+                                                : (status.finished ? "Done" : "Cancel");
+        FUCK::BeginDisabled(status.copying);
+        const bool closeClicked = ChamferPanel::Button(closeLabel).clicked;
+        FUCK::EndDisabled();
+        if (closeClicked) {
             if (!status.busy) {
                 ArmorExport::Acknowledge();
             }

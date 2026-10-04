@@ -7,7 +7,7 @@
 // the player's outfit, every current follower who owns an outfit of the SAME
 // NAME in her own Fitting Room library switches to it too. A follower without
 // one is left alone. The engine-facing half lives in WorldWatch.cpp
-// (SyncFollowers) and OutfitSession::MirrorNpcSelection.
+// (SyncFollowers) and OutfitSession::SyncNpc.
 //
 // ⚠ IT MIRRORS THE BASE AND NOTHING ELSE. Overlays (hide headgear, restyle a
 // slot) are a player-only concept in OutfitSession - there is no per-NPC
@@ -145,6 +145,61 @@ namespace OS::FollowerMirror {
             return false;
         }
         return false;
+    }
+
+    // What she is wearing now, as a target: her active outfit, or real gear.
+    [[nodiscard]] inline Target CurrentSelection(const OutfitLibrary& a_lib) {
+        const auto* o = a_lib.Active();
+        return o ? Target{ false, o->name } : Target{ true, {} };
+    }
+
+    // Per follower, what the mirror knows about her. Saved in the co-save.
+    struct FollowerRecord {
+        std::optional<Target> synced;    // the target she was last brought in line with
+        bool                  mirrored{ false };  // her current outfit was put on by the mirror
+        Target                own{ true, {} };    // what she wore before the mirror first changed her
+
+        friend bool operator==(const FollowerRecord&, const FollowerRecord&) = default;
+    };
+
+    enum class SyncResult : std::uint8_t {
+        kNoChange,  // nothing about her look changed
+        kChanged,   // switched to the target
+        kRestored,  // the target has nothing for her, so she went back to her own look
+    };
+
+    // One follower, one target: the whole per-follower decision, pure.
+    //  - She has the target outfit: switch, remembering her own look the first
+    //    time the mirror changes her.
+    //  - She does NOT have it (2026-10-04 review: a "real gear" rule followed
+    //    by a rule she has no outfit for left her stuck in real gear): if the
+    //    mirror dressed her, she goes back to her own look; if she dressed
+    //    herself (by hand), she is left alone.
+    // Either way she is marked as synced to this target, so a hand pick stays
+    // only until the target moves on.
+    inline SyncResult SyncStep(OutfitLibrary& a_lib, FollowerRecord& a_rec, const Target& a_target) {
+        const auto plan = PlanFor(a_lib, a_target);
+        a_rec.synced    = a_target;
+        switch (plan.action) {
+        case Action::kAlready:
+            return SyncResult::kNoChange;
+        case Action::kMissing: {
+            if (!a_rec.mirrored) {
+                return SyncResult::kNoChange;
+            }
+            a_rec.mirrored = false;
+            const auto back = PlanFor(a_lib, a_rec.own);
+            return Apply(a_lib, back) ? SyncResult::kRestored : SyncResult::kNoChange;
+        }
+        case Action::kActivate:
+        case Action::kDeactivate:
+            if (!a_rec.mirrored) {
+                a_rec.own      = CurrentSelection(a_lib);
+                a_rec.mirrored = true;
+            }
+            return Apply(a_lib, plan) ? SyncResult::kChanged : SyncResult::kNoChange;
+        }
+        return SyncResult::kNoChange;
     }
 
 }  // namespace OS::FollowerMirror

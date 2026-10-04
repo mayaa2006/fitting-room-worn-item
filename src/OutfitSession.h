@@ -419,17 +419,14 @@ namespace OS {
         void UpsertNpcLibrary(const NpcKey& a_key, OutfitLibrary a_library);
         void RemoveNpcAssignment(const NpcKey& a_key);
 
-        // Follower mirroring (addon, see FollowerMirror.h): make an ASSIGNED
-        // NPC's own active outfit match a_target, as one locked
-        // read-modify-write so it cannot interleave with another mutation of
-        // the same map. Returns what it did: kMissing when she has no
-        // assignment or no outfit of that name (nothing touched), kAlready
-        // when she already matches, kActivate/kDeactivate when it changed her
-        // selection - and only then is the render snapshot rebuilt. Like
+        // Follower mirroring (addon, see FollowerMirror.h): one follower's
+        // SyncStep against her own library, as one locked read-modify-write.
+        // An NPC with no assignment is only marked synced (nothing to dress).
+        // The render snapshot is rebuilt only when her look changed. Like
         // UpsertNpcLibrary it does NOT refresh the actor; the caller kicks
         // RequestRefreshActor on a change.
-        FollowerMirror::Action MirrorNpcSelection(const NpcKey&                 a_key,
-                                                  const FollowerMirror::Target& a_target);
+        FollowerMirror::SyncResult SyncNpc(const NpcKey& a_key, FollowerMirror::FollowerRecord& a_rec,
+                                           const FollowerMirror::Target& a_target);
 
         // A consistent copy for the editor's target picker / draw loop.
         [[nodiscard]] NpcAssignmentMap SnapshotNpcAssignments() const;

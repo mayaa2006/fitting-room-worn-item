@@ -37,9 +37,14 @@ namespace OS::ArmorExport {
             std::scoped_lock l(g_statusLock);
             g_status.message = std::move(a_msg);
         }
+        void SetCopying(bool a_on) {
+            std::scoped_lock l(g_statusLock);
+            g_status.copying = a_on;
+        }
         void Finish(bool a_ok, std::string a_msg) {
             std::scoped_lock l(g_statusLock);
             g_status.busy     = false;
+            g_status.copying  = false;
             g_status.finished = true;
             g_status.ok       = a_ok;
             g_status.message  = std::move(a_msg);
@@ -124,7 +129,8 @@ namespace OS::ArmorExport {
             return EspWriter::FormRef{ std::string(file->GetFilename()), a_form->GetLocalFormID(), false };
         }
 
-        // Plugin strings are Windows-1252; ImGui gives us UTF-8.
+        // Plugin strings are in the system ANSI code page (1252 on Western
+        // installs, 1251 on Russian ones...); ImGui gives us UTF-8.
         std::string ToCp1252(const std::string& a_utf8) {
             if (a_utf8.empty()) {
                 return a_utf8;
@@ -136,12 +142,12 @@ namespace OS::ArmorExport {
             }
             std::wstring w(static_cast<std::size_t>(wlen), L'\0');
             MultiByteToWideChar(CP_UTF8, 0, a_utf8.data(), static_cast<int>(a_utf8.size()), w.data(), wlen);
-            const int len = WideCharToMultiByte(1252, 0, w.data(), wlen, nullptr, 0, "?", nullptr);
+            const int len = WideCharToMultiByte(CP_ACP, 0, w.data(), wlen, nullptr, 0, "?", nullptr);
             if (len <= 0) {
                 return a_utf8;
             }
             std::string out(static_cast<std::size_t>(len), '\0');
-            WideCharToMultiByte(1252, 0, w.data(), wlen, out.data(), len, "?", nullptr);
+            WideCharToMultiByte(CP_ACP, 0, w.data(), wlen, out.data(), len, "?", nullptr);
             return out;
         }
 
@@ -149,6 +155,8 @@ namespace OS::ArmorExport {
             const char* m = a_model.GetModel();
             return (m && *m) ? std::string(m) : std::string{};
         }
+
+        constexpr const char* kMarkerFile = "FittingRoomExport.txt";
 
         std::vector<std::uint8_t> ArchiveBytes(const std::string& a_path) {
             RE::BSResourceNiBinaryStream stream{ a_path.c_str() };
@@ -358,8 +366,10 @@ namespace OS::ArmorExport {
 
         void Gather(Request a_req) {
             auto job        = std::make_shared<Job>();
-            job->pluginName = M::SafeName(a_req.pluginName, 48, "Fitting Room Armor");
-            job->stem       = M::SafeStem(job->pluginName, 48, "Outfit");
+            job->pluginName = M::SafeName(M::PluginStem(a_req.pluginName), 48, "Fitting Room Armor");
+            // Short on purpose: it is a folder in every exported path, and
+            // MO2 / Wabbajack installs already eat much of Windows' 260.
+            job->stem       = M::SafeStem(job->pluginName, 24, "Outfit");
             job->recipe     = a_req.recipe;
 
             auto* player = RE::PlayerCharacter::GetSingleton();
@@ -382,14 +392,23 @@ namespace OS::ArmorExport {
             }
             {
                 // Never overwrite an earlier export: its items may be in saves.
+                // A finished export always has its .esp and a marker file in
+                // its mesh folder; folders WITHOUT the marker are what a failed
+                // or interrupted export left behind, and are cleared.
                 std::error_code ec;
-                if (fs::exists(fs::path("Data") / (job->pluginName + ".esp"), ec) ||
-                    fs::exists(fs::path("Data\\meshes\\FittingRoom\\Armor") / job->stem, ec) ||
-                    fs::exists(fs::path("Data\\textures\\FittingRoom\\Armor") / job->stem, ec)) {
-                    Finish(false, "An export named \"" + job->pluginName +
-                                      "\" already exists. Pick a new plugin name.");
+                const auto meshDir = fs::path("Data\\meshes\\FittingRoom\\Armor") / job->stem;
+                const auto texDir  = fs::path("Data\\textures\\FittingRoom\\Armor") / job->stem;
+                if (fs::exists(fs::path("Data") / (job->pluginName + ".esp"), ec)) {
+                    Finish(false, "\"" + job->pluginName + ".esp\" already exists. Pick a new plugin name.");
                     return;
                 }
+                if (fs::exists(meshDir / kMarkerFile, ec)) {
+                    Finish(false, "An earlier export already uses the folder \"" + job->stem +
+                                      "\". Pick a more different plugin name.");
+                    return;
+                }
+                fs::remove_all(meshDir, ec);
+                fs::remove_all(texDir, ec);
             }
             const auto sex = base->GetSex() == RE::SEX::kFemale ? RE::SEX::kFemale : RE::SEX::kMale;
 
@@ -437,6 +456,12 @@ namespace OS::ArmorExport {
                 }
                 if (item.addons.empty()) {
                     continue;
+                }
+                // Jewelry merged into a torso keeps its mesh but not its slots:
+                // otherwise the cuirass would unequip your real amulet and
+                // rings and count as a necklace at the enchanter.
+                if (item.bucket == Bucket::kTorso && (item.slots & M::kBodyBit)) {
+                    item.slots &= ~(M::kAmuletBit | M::kRingBit);
                 }
                 // The body piece is the merge's base, so its root extra data
                 // (body morph and physics links) is the one that survives.
@@ -548,10 +573,18 @@ namespace OS::ArmorExport {
             std::error_code ec;
             const fs::path  path(a_b.file);
             fs::create_directories(path.parent_path(), ec);
+            const auto tmp = fs::path(path.wstring() + L".tmp");
             hr = DirectX::SaveToDDSFile(out.GetImages(), out.GetImageCount(), out.GetMetadata(),
-                                        DirectX::DDS_FLAGS_NONE, path.wstring().c_str());
+                                        DirectX::DDS_FLAGS_NONE, tmp.wstring().c_str());
             if (FAILED(hr)) {
+                fs::remove(tmp, ec);
                 a_err = "could not write " + a_b.file;
+                return false;
+            }
+            fs::rename(tmp, path, ec);
+            if (ec) {
+                fs::remove(tmp, ec);
+                a_err = "could not place " + a_b.file;
                 return false;
             }
             return true;
@@ -610,12 +643,18 @@ namespace OS::ArmorExport {
                 a_err = std::string(M::BucketLabel(a_item.bucket)) + " merge: " + merged.error;
                 return false;
             }
+            if (merged.droppedExtra > 0 && !a_firstPerson && a_variant != "_0") {
+                a_notes.push_back(std::to_string(merged.droppedExtra) + " piece(s) merged into the " +
+                                  M::BucketLabel(a_item.bucket) +
+                                  " had body-slider or physics data that one merged mesh cannot keep; "
+                                  "they will not follow body sliders");
+            }
             a_out = std::move(merged.bytes);
             return true;
         }
 
         // Self-contained export: copies every armour texture a mesh uses into
-        // the export folder (keeping its original relative path under src\)
+        // the export folder (under src\, with short hashed names)
         // and points the mesh at the copies. Baked dyes are already there.
         // Skin shapes are left alone by NifExport, so the game still paints
         // them with the wearer's skin. a_copied is shared across the export so
@@ -638,7 +677,7 @@ namespace OS::ArmorExport {
                         a_job.notes.push_back("could not copy textures\\" + key +
                                               ", so the mesh still uses the original");
                     } else {
-                        dst = ownRoot + "src\\" + key;
+                        dst = ownRoot + "src\\" + M::CopiedTextureFileName(key);
                         if (!WriteFile(fs::path("Data\\" + dst), src, a_err)) {
                             return false;
                         }
@@ -676,6 +715,15 @@ namespace OS::ArmorExport {
             return g_rbOk;
         }
 
+        // A failed export removes everything it wrote, so nothing half-made is
+        // left in Data and the same name can be used again.
+        void Fail(const Job& a_job, std::string a_msg) {
+            std::error_code ec;
+            fs::remove_all(fs::path("Data\\meshes\\FittingRoom\\Armor") / a_job.stem, ec);
+            fs::remove_all(fs::path("Data\\textures\\FittingRoom\\Armor") / a_job.stem, ec);
+            Finish(false, std::move(a_msg));
+        }
+
         void Worker(std::shared_ptr<Job> a_job) {
             auto& job = *a_job;
             try {
@@ -683,11 +731,14 @@ namespace OS::ArmorExport {
                 // compress and write here, free, next.
                 int                   n = 0;
                 std::set<std::string> failed;  // NIF paths of bakes that did not land
+                SetCopying(!job.bakes.empty());
                 for (auto& b : job.bakes) {
                     ++n;
                     const auto of = std::to_string(n) + " of " + std::to_string(job.bakes.size());
                     SetStatus("Copying dyed texture " + of + "...");
+                    SetCopying(true);
                     b.read = RequestReadback(b);
+                    SetCopying(false);
                     std::string err;
                     if (!b.read) {
                         failed.insert(b.nifPath);
@@ -750,7 +801,7 @@ namespace OS::ArmorExport {
                     for (const auto& v : variants) {
                         std::vector<std::uint8_t> bytes;
                         if (!BuildNif(item, v, false, bytes, job.notes, err)) {
-                            Finish(false, err);
+                            Fail(job, err);
                             return;
                         }
                         if (bytes.empty()) {
@@ -758,12 +809,12 @@ namespace OS::ArmorExport {
                         }
                         SetStatus("Copying the " + label + " textures...");
                         if (!LocalizeTextures(job, copiedTextures, bytes, err)) {
-                            Finish(false, err);
+                            Fail(job, err);
                             return;
                         }
                         const auto rel = meshRel + label + v + ".nif";
                         if (!WriteFile(fs::path("Data\\meshes\\" + rel), bytes, err)) {
-                            Finish(false, err);
+                            Fail(job, err);
                             return;
                         }
                         ++wroteVariants;
@@ -783,19 +834,19 @@ namespace OS::ArmorExport {
                         for (const auto& v : variants) {
                             std::vector<std::uint8_t> bytes;
                             if (!BuildNif(item, v, true, bytes, job.notes, err)) {
-                                Finish(false, err);
+                                Fail(job, err);
                                 return;
                             }
                             if (bytes.empty()) {
                                 break;
                             }
                             if (!LocalizeTextures(job, copiedTextures, bytes, err)) {
-                                Finish(false, err);
+                                Fail(job, err);
                                 return;
                             }
                             const auto rel = meshRel + label + "_1stPerson" + v + ".nif";
                             if (!WriteFile(fs::path("Data\\meshes\\" + rel), bytes, err)) {
-                                Finish(false, err);
+                                Fail(job, err);
                                 return;
                             }
                             ++wrote1st;
@@ -875,7 +926,7 @@ namespace OS::ArmorExport {
                     ++written;
                 }
                 if (written == 0) {
-                    Finish(false, "No mesh could be written." +
+                    Fail(job, "No mesh could be written." +
                                       (job.notes.empty() ? std::string{} : " " + job.notes.front()));
                     return;
                 }
@@ -884,10 +935,14 @@ namespace OS::ArmorExport {
                 std::string err;
                 const auto  espName = job.pluginName + ".esp";
                 if (!WriteFile(fs::path("Data") / espName, EspWriter::Serialize(spec), err)) {
-                    Finish(false, err);
+                    Fail(job, err);
                     return;
                 }
 
+                {
+                    std::ofstream marker(fs::path("Data\\meshes\\FittingRoom\\Armor") / job.stem / kMarkerFile);
+                    marker << espName << "\n";
+                }
                 std::string msg = "Made " + std::to_string(written) + " item" + (written == 1 ? "" : "s") +
                                   " in \"" + espName + "\". Enable it in your mod manager's plugin list and "
                                   "restart the game, then craft them at any forge.";
@@ -902,9 +957,9 @@ namespace OS::ArmorExport {
                 }
                 Finish(true, msg);
             } catch (const std::exception& e) {
-                Finish(false, std::string("Export failed: ") + e.what());
+                Fail(job, std::string("Export failed: ") + e.what());
             } catch (...) {
-                Finish(false, "Export failed with an unknown error.");
+                Fail(job, "Export failed with an unknown error.");
             }
         }
 

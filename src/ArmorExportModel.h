@@ -193,6 +193,55 @@ namespace OS::ArmorExportModel {
         return out.empty() ? std::string("Piece") : out;
     }
 
+    // A plugin name as typed, minus a trailing ".esp"/".esm"/".esl" so
+    // "My Armor.esp" does not become "My Armoresp.esp".
+    [[nodiscard]] inline std::string PluginStem(std::string_view a_in) {
+        std::string s(a_in);
+        while (!s.empty() && s.back() == ' ') {
+            s.pop_back();
+        }
+        for (const char* ext : { ".esp", ".esm", ".esl" }) {
+            if (detail::EndsWithI(s, ext)) {
+                s.resize(s.size() - 4);
+                break;
+            }
+        }
+        return s;
+    }
+
+    // 64-bit FNV-1a, hex. Stable across runs and platforms.
+    [[nodiscard]] inline std::string HashHex(std::string_view a_s) {
+        std::uint64_t h = 1469598103934665603ull;
+        for (unsigned char c : a_s) {
+            h ^= c;
+            h *= 1099511628211ull;
+        }
+        static constexpr char kHex[] = "0123456789abcdef";
+        std::string out(16, '0');
+        for (int i = 15; i >= 0; --i) {
+            out[static_cast<std::size_t>(i)] = kHex[h & 0xF];
+            h >>= 4;
+        }
+        return out;
+    }
+
+    // File name for a copied source texture: short and unique, so a deep
+    // original path under a long Mod Organizer folder cannot push the copy
+    // past Windows' 260-character limit. Keeps the original file name (capped)
+    // for readability: "<hash>_<name>.dds".
+    [[nodiscard]] inline std::string CopiedTextureFileName(std::string_view a_key) {
+        std::string_view file = a_key;
+        if (const auto slash = file.find_last_of('\\'); slash != std::string_view::npos) {
+            file = file.substr(slash + 1);
+        }
+        std::string stem(file);
+        if (detail::EndsWithI(stem, ".dds")) {
+            stem.resize(stem.size() - 4);
+        }
+        stem = SafeStem(stem, 32, "tex");
+        return HashHex(a_key).substr(0, 12) + "_" + stem + ".dds";
+    }
+
     // Biped slot bits (bit 0 = slot 30).
     inline constexpr std::uint32_t kHeadBits   = (1u << 0) | (1u << 1);  // 30 head, 31 hair
     inline constexpr std::uint32_t kBodyBit    = 1u << 2;                // 32

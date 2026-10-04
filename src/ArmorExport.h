@@ -67,6 +67,9 @@ namespace OS::ArmorExport {
 
     struct Status {
         bool        busy{ false };
+        // Copying dyed textures off the GPU: that step needs the editor's
+        // render hook, so the window must stay open until it is over.
+        bool        copying{ false };
         bool        finished{ false };
         bool        ok{ false };
         std::string message;

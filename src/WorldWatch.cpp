@@ -592,6 +592,13 @@ namespace OS::WorldWatch {
                     Rules::FormKey key;
                     if (!seen && MakeFormKey(armo, key)) {
                         snap.wornItems.push_back(std::move(key));
+                        // A looted enchanted variant ("Glass Helmet of Eminent
+                        // Archery") is its own record built on the plain one;
+                        // a rule naming the plain helmet should still fire.
+                        Rules::FormKey base;
+                        if (armo->templateArmor && MakeFormKey(armo->templateArmor, base)) {
+                            snap.wornItems.push_back(std::move(base));
+                        }
                     }
                 }
             }
@@ -815,9 +822,14 @@ namespace OS::WorldWatch {
         // stamped against the target that is about to come back, or it would
         // re-dress her the moment it does.
         std::optional<FollowerMirror::Target>                 g_lastMirror;
-        using MirrorSyncMap = std::unordered_map<NpcKey, FollowerMirror::Target, NpcKeyHash>;
+        using MirrorSyncMap = std::unordered_map<NpcKey, FollowerMirror::FollowerRecord, NpcKeyHash>;
         MirrorSyncMap                                         g_mirrorSynced;
-        MirrorSyncMap                                         g_mirrorSyncedStaged;  // from 'FMIR', adopted at OnSaveLoaded
+        // From 'FMIR', adopted at OnSaveLoaded: the per-follower records and
+        // the rule that owned the player's base when the save was written, so
+        // mirroring carries on after a load before any rule fires again.
+        MirrorSyncMap g_mirrorSyncedStaged;
+        std::string   g_baseRuleIdStaged;
+        Rules::Base   g_baseAppliedStaged;
 
         // Latch so a steady deferral logs once rather than every heartbeat
         // (hazard 10, same reasoning as the kSuppressed/kPaused latches).
@@ -978,7 +990,7 @@ namespace OS::WorldWatch {
                     return RE::BSContainer::ForEachResult::kContinue;
                 }
                 if (const auto it = g_mirrorSynced.find(*key);
-                    it != g_mirrorSynced.end() && it->second == target) {
+                    it != g_mirrorSynced.end() && it->second.synced == target) {
                     return RE::BSContainer::ForEachResult::kContinue;  // already in line
                 }
                 for (auto& p : pending) {
@@ -997,45 +1009,53 @@ namespace OS::WorldWatch {
             // that changed.
             auto& session = OutfitSession::GetSingleton();
             for (auto& p : pending) {
-                switch (session.MirrorNpcSelection(p.key, target)) {
-                    case FollowerMirror::Action::kMissing:
-                        // No outfit by that name (or never dressed here at
-                        // all): leave her be. Not marked synced, so creating
-                        // the outfit for her later takes effect without
-                        // waiting for the next rule change.
-                        break;
-                    case FollowerMirror::Action::kAlready:
-                        g_mirrorSynced[p.key] = target;
-                        break;
-                    case FollowerMirror::Action::kActivate:
-                    case FollowerMirror::Action::kDeactivate:
-                        g_mirrorSynced[p.key] = target;
-                        for (const auto& h : p.handles) {
-                            OutfitSession::RequestRefreshActor(h);
-                        }
-                        spdlog::info("rules: follower '{}' -> {}", p.name,
-                                     target.realGear ? std::string("real gear")
-                                                     : fmt::format("'{}'", target.outfitName));
-                        break;
+                auto&      rec = g_mirrorSynced[p.key];
+                const auto own = rec.own;
+                const auto r   = session.SyncNpc(p.key, rec, target);
+                if (r == FollowerMirror::SyncResult::kNoChange) {
+                    continue;
+                }
+                for (const auto& h : p.handles) {
+                    OutfitSession::RequestRefreshActor(h);
+                }
+                if (r == FollowerMirror::SyncResult::kChanged) {
+                    spdlog::info("rules: follower '{}' -> {}", p.name,
+                                 target.realGear ? std::string("real gear")
+                                                 : fmt::format("'{}'", target.outfitName));
+                } else {
+                    spdlog::info("rules: follower '{}' has no '{}', back to her own {}", p.name,
+                                 target.realGear ? std::string("real gear") : target.outfitName,
+                                 own.realGear ? std::string("real gear") : fmt::format("'{}'", own.outfitName));
                 }
             }
         }
 
-        // 'FMIR' payload: {"v":1,"followers":[{"mod","id","real","outfit"}]}.
-        // JSON so a future field is an ignorable key rather than a format bump.
-        std::string EncodeMirrorMap(const MirrorSyncMap& a_map) {
-            if (a_map.empty()) {
+        // 'FMIR' payload (v2): {"v":2, "baseRule", "baseKind", "baseOutfit",
+        // "followers":[{"mod","id", "synced", "real","outfit", "mirrored",
+        // "ownReal","ownOutfit"}]}. v1 (followers with real/outfit only) still
+        // reads. JSON so a future field is an ignorable key, not a format bump.
+        std::string EncodeMirrorState() {
+            if (g_mirrorSynced.empty() && g_baseRuleId.empty()) {
                 return {};
             }
             Json::Value root(Json::objectValue);
-            root["v"] = 1;
+            root["v"]          = 2;
+            root["baseRule"]   = g_baseRuleId;
+            root["baseKind"]   = static_cast<int>(g_baseApplied.kind);
+            root["baseOutfit"] = g_baseApplied.outfitName;
             Json::Value arr(Json::arrayValue);
-            for (const auto& [key, t] : a_map) {
+            for (const auto& [key, rec] : g_mirrorSynced) {
                 Json::Value e(Json::objectValue);
                 e["mod"]    = key.modName;
                 e["id"]     = key.localFormID;
-                e["real"]   = t.realGear;
-                e["outfit"] = t.outfitName;
+                e["synced"] = rec.synced.has_value();
+                if (rec.synced) {
+                    e["real"]   = rec.synced->realGear;
+                    e["outfit"] = rec.synced->outfitName;
+                }
+                e["mirrored"]  = rec.mirrored;
+                e["ownReal"]   = rec.own.realGear;
+                e["ownOutfit"] = rec.own.outfitName;
                 arr.append(e);
             }
             root["followers"] = arr;
@@ -1044,27 +1064,47 @@ namespace OS::WorldWatch {
             return Json::writeString(wb, root);
         }
 
-        MirrorSyncMap DecodeMirrorMap(const std::string& a_json) {
-            MirrorSyncMap out;
-            Json::Value   root;
+        void DecodeMirrorState(const std::string& a_json) {
+            g_mirrorSyncedStaged.clear();
+            g_baseRuleIdStaged.clear();
+            g_baseAppliedStaged = Rules::Base{};
+            Json::Value             root;
             Json::CharReaderBuilder rb;
             std::string             err;
             std::istringstream      in(a_json);
-            if (!Json::parseFromStream(rb, in, &root, &err) || !root.isObject() ||
-                !root["followers"].isArray()) {
+            if (!Json::parseFromStream(rb, in, &root, &err) || !root.isObject()) {
                 spdlog::warn("rules: follower mirror record unreadable ({}); starting fresh", err);
-                return out;
+                return;
+            }
+            if (root["baseRule"].isString() && root["baseKind"].isInt() && root["baseOutfit"].isString()) {
+                const int k = root["baseKind"].asInt();
+                if (k >= 0 && k <= 2) {
+                    g_baseRuleIdStaged             = root["baseRule"].asString();
+                    g_baseAppliedStaged.kind       = static_cast<Rules::BaseKind>(k);
+                    g_baseAppliedStaged.outfitName = root["baseOutfit"].asString();
+                }
+            }
+            if (!root["followers"].isArray()) {
+                return;
             }
             for (const auto& e : root["followers"]) {
-                if (!e.isObject() || !e["mod"].isString() || !e["id"].isUInt() ||
-                    !e["real"].isBool() || !e["outfit"].isString()) {
+                if (!e.isObject() || !e["mod"].isString() || !e["id"].isUInt()) {
                     continue;
                 }
-                out[NpcKey{ e["mod"].asString(), e["id"].asUInt() }] =
-                    FollowerMirror::Target{ e["real"].asBool(), e["outfit"].asString() };
+                FollowerMirror::FollowerRecord rec;
+                const bool v1Synced = !e.isMember("synced");
+                if ((v1Synced || (e["synced"].isBool() && e["synced"].asBool())) && e["real"].isBool() &&
+                    e["outfit"].isString()) {
+                    rec.synced = FollowerMirror::Target{ e["real"].asBool(), e["outfit"].asString() };
+                }
+                if (e["mirrored"].isBool() && e["ownReal"].isBool() && e["ownOutfit"].isString()) {
+                    rec.mirrored = e["mirrored"].asBool();
+                    rec.own      = FollowerMirror::Target{ e["ownReal"].asBool(), e["ownOutfit"].asString() };
+                }
+                g_mirrorSyncedStaged[NpcKey{ e["mod"].asString(), e["id"].asUInt() }] = std::move(rec);
             }
-            return out;
         }
+
         // ---- The evaluate-and-apply pass -------------------------------------
 
         void Evaluate() {
@@ -1548,6 +1588,10 @@ namespace OS::WorldWatch {
             // user had dressed by hand.
             g_mirrorSynced = std::move(g_mirrorSyncedStaged);
             g_mirrorSyncedStaged.clear();
+            g_baseRuleId   = std::move(g_baseRuleIdStaged);
+            g_baseApplied  = g_baseAppliedStaged;
+            g_baseRuleIdStaged.clear();
+            g_baseAppliedStaged = Rules::Base{};
             // The cast latch belongs to the session that was running, not to
             // this one. A spell id left over from the previous save would have
             // PlayerIsCastingNow querying a form this save may not even have.
@@ -1586,6 +1630,8 @@ namespace OS::WorldWatch {
             g_lastPushedAdvancedValidity.clear();
             ResetFollowerMirror();
             g_mirrorSyncedStaged.clear();  // revert precedes the next load's staging
+            g_baseRuleIdStaged.clear();
+            g_baseAppliedStaged = Rules::Base{};
             g_lastCastSpell.store(0, std::memory_order_relaxed);  // see OnSaveLoaded
             g_lastCastAt.store(-1.0e9, std::memory_order_relaxed);
             g_loadGate = RefreshGate::BlockingCooldown{};  // review finding 4
@@ -1791,21 +1837,24 @@ namespace OS::WorldWatch {
                     // none is set, the last one): she keeps her own look until
                     // the target moves to something else. With no target ever
                     // set there is nothing to protect her from.
-                    const auto& t = g_mirror ? g_mirror : g_lastMirror;
+                    // Her look is her own now, whatever the mirror did before.
+                    const auto& t   = g_mirror ? g_mirror : g_lastMirror;
+                    auto&       rec = g_mirrorSynced[a_key];
+                    rec.mirrored    = false;
                     if (t) {
-                        g_mirrorSynced[a_key] = *t;
+                        rec.synced = *t;
                     } else {
-                        g_mirrorSynced.erase(a_key);
+                        rec.synced.reset();
                     }
                 });
             });
         }
     }
 
-    std::string EncodeFollowerMirrorJson() { return EncodeMirrorMap(g_mirrorSynced); }
+    std::string EncodeFollowerMirrorJson() { return EncodeMirrorState(); }
 
     void StageFollowerMirrorJson(const std::string& a_json) {
-        g_mirrorSyncedStaged = DecodeMirrorMap(a_json);
+        DecodeMirrorState(a_json);
         spdlog::info("rules: follower mirror record loaded ({} follower(s))",
                      g_mirrorSyncedStaged.size());
     }

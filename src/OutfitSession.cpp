@@ -2313,22 +2313,22 @@ namespace OS {
         // co-save state, persisted from SnapshotNpcAssignments in SaveCallback.
     }
 
-    FollowerMirror::Action OutfitSession::MirrorNpcSelection(const NpcKey&                 a_key,
-                                                             const FollowerMirror::Target& a_target) {
+    FollowerMirror::SyncResult OutfitSession::SyncNpc(const NpcKey& a_key, FollowerMirror::FollowerRecord& a_rec,
+                                                      const FollowerMirror::Target& a_target) {
         std::scoped_lock l(lock_);
         const auto it = npcAssignments_.find(a_key);
         if (it == npcAssignments_.end()) {
-            return FollowerMirror::Action::kMissing;  // never dressed in Fitting Room
+            a_rec.synced = a_target;  // never dressed in Fitting Room
+            return FollowerMirror::SyncResult::kNoChange;
         }
-        auto&      lib  = it->second.library;
-        const auto plan = FollowerMirror::PlanFor(lib, a_target);
-        if (FollowerMirror::Apply(lib, plan)) {
+        const auto r = FollowerMirror::SyncStep(it->second.library, a_rec, a_target);
+        if (r != FollowerMirror::SyncResult::kNoChange) {
             // Same bookkeeping UpsertNpcLibrary does after a library edit: the
             // render hook reads the rebuilt snapshot, never this map. No
             // outfits.json save - assignments are per-save co-save state.
             RebuildSnapshotLocked();
         }
-        return plan.action;
+        return r;
     }
 
     void OutfitSession::RemoveNpcAssignment(const NpcKey& a_key) {

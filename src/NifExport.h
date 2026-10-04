@@ -35,6 +35,8 @@ namespace OS::NifExport {
         int                       edited{ 0 };     // shapes an edit landed on
         int                       remapped{ 0 };   // texture slots changed by a_remap
         int                       unmatched{ 0 };  // edits that found no shape
+        int                       droppedExtra{ 0 };  // Merge: non-base files whose root extra data
+                                                      // (BODYTRI morphs, physics) could not come along
         std::string               error;
     };
 
