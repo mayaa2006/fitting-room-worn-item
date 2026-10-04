@@ -187,6 +187,26 @@ int main() {
         CHECK(one.ok && one.bytes == skinned);
     }
 
+    {  // Self-contained export: list the armour textures, repoint them all.
+        const auto list = LocalizableTextures(skinned);
+        CHECK(!list.empty());
+        std::map<std::string, std::string> map;
+        for (const auto& p : list) {
+            map.emplace(M::TextureKey(p), "textures\\FittingRoom\\Armor\\T\\src\\" + M::TextureKey(p));
+        }
+        const auto r = Localize(skinned, map);
+        CHECK(r.ok);
+        CHECK(r.remapped >= static_cast<int>(list.size()));
+        // Every listed texture now lives under the export folder.
+        for (const auto& p : LocalizableTextures(r.bytes)) {
+            CHECK(M::TextureKey(p).starts_with("fittingroom\\armor\\t\\src\\"));
+        }
+        CHECK(ShapeNames(r.bytes) == names);
+        // Nothing to map is a no-op that still round-trips.
+        const auto none = Localize(skinned, {});
+        CHECK(none.ok && none.remapped == 0);
+    }
+
     {  // Garbage in is an error, not a crash.
         const auto r = Rewrite({ 1, 2, 3, 4 }, {}, {});
         CHECK(!r.ok);

@@ -56,6 +56,20 @@ namespace OS::NifExport {
     // unchanged.
     [[nodiscard]] Result Merge(const std::vector<std::vector<std::uint8_t>>& a_nifs);
 
+    // Self-contained export: every texture path the file's ARMOUR shapes use
+    // (lighting texture sets and effect-shader textures). Skin shapes - face,
+    // skin-tint and hair-tint lighting shaders - are left out on purpose: the
+    // engine paints those with the wearer's own skin at runtime, so a copied
+    // path there would be ignored at best and freeze one skin at worst.
+    [[nodiscard]] std::vector<std::string> LocalizableTextures(const std::vector<std::uint8_t>& a_nif);
+
+    // Points those same armour-shape paths at new files: any path whose
+    // ArmorExportModel::TextureKey is a key of a_map becomes its value. Skin
+    // shapes are never touched, and a texture set shared with one is cloned
+    // first. Result::remapped counts the slots changed.
+    [[nodiscard]] Result Localize(const std::vector<std::uint8_t>&          a_nif,
+                                  const std::map<std::string, std::string>& a_map);
+
     // Shape names in the same depth-first order Rewrite matches by. For tests
     // and diagnostics.
     [[nodiscard]] std::vector<std::string> ShapeNames(const std::vector<std::uint8_t>& a_nif);

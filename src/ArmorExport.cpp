@@ -614,6 +614,53 @@ namespace OS::ArmorExport {
             return true;
         }
 
+        // Self-contained export: copies every armour texture a mesh uses into
+        // the export folder (keeping its original relative path under src\)
+        // and points the mesh at the copies. Baked dyes are already there.
+        // Skin shapes are left alone by NifExport, so the game still paints
+        // them with the wearer's skin. a_copied is shared across the export so
+        // each texture is copied once.
+        bool LocalizeTextures(Job& a_job, std::map<std::string, std::string>& a_copied,
+                              std::vector<std::uint8_t>& a_bytes, std::string& a_err) {
+            const std::string ownRoot = "textures\\FittingRoom\\Armor\\" + a_job.stem + "\\";
+            const std::string ownKey  = M::TextureKey(ownRoot);
+            std::map<std::string, std::string> map;
+            for (const auto& path : NifExport::LocalizableTextures(a_bytes)) {
+                const auto key = M::TextureKey(path);
+                if (key.empty() || key.starts_with(ownKey)) {
+                    continue;  // empty slot, or one of our baked dyes
+                }
+                auto it = a_copied.find(key);
+                if (it == a_copied.end()) {
+                    const auto src = ArchiveBytes("textures\\" + key);
+                    std::string dst;
+                    if (src.empty()) {
+                        a_job.notes.push_back("could not copy textures\\" + key +
+                                              ", so the mesh still uses the original");
+                    } else {
+                        dst = ownRoot + "src\\" + key;
+                        if (!WriteFile(fs::path("Data\\" + dst), src, a_err)) {
+                            return false;
+                        }
+                    }
+                    it = a_copied.emplace(key, dst).first;
+                }
+                if (!it->second.empty()) {
+                    map.emplace(key, it->second);
+                }
+            }
+            if (map.empty()) {
+                return true;
+            }
+            auto r = NifExport::Localize(a_bytes, map);
+            if (!r.ok) {
+                a_err = "texture copy: " + r.error;
+                return false;
+            }
+            a_bytes = std::move(r.bytes);
+            return true;
+        }
+
         // Worker side of the readback handoff. False if the render thread did
         // not get to it in time (the pump only runs while FLICK renders).
         bool RequestReadback(Bake& a_b) {
@@ -686,6 +733,7 @@ namespace OS::ArmorExport {
                 spec.description = "Made from the Fitting Room outfit export.";
                 spec.masterOrder = job.masterOrder;
                 std::uint32_t nextId = 0x800;
+                std::map<std::string, std::string> copiedTextures;  // texture key -> copy (empty: failed)
                 int           written = 0;
                 for (auto& item : job.items) {
                     const std::string label = M::BucketLabel(item.bucket);
@@ -707,6 +755,11 @@ namespace OS::ArmorExport {
                         }
                         if (bytes.empty()) {
                             break;
+                        }
+                        SetStatus("Copying the " + label + " textures...");
+                        if (!LocalizeTextures(job, copiedTextures, bytes, err)) {
+                            Finish(false, err);
+                            return;
                         }
                         const auto rel = meshRel + label + v + ".nif";
                         if (!WriteFile(fs::path("Data\\meshes\\" + rel), bytes, err)) {
@@ -735,6 +788,10 @@ namespace OS::ArmorExport {
                             }
                             if (bytes.empty()) {
                                 break;
+                            }
+                            if (!LocalizeTextures(job, copiedTextures, bytes, err)) {
+                                Finish(false, err);
+                                return;
                             }
                             const auto rel = meshRel + label + "_1stPerson" + v + ".nif";
                             if (!WriteFile(fs::path("Data\\meshes\\" + rel), bytes, err)) {

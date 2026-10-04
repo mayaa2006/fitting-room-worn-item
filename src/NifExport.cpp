@@ -280,6 +280,91 @@ namespace OS::NifExport {
         return r;
     }
 
+    namespace {
+        bool IsSkinShader(NiShader* a_shader) {
+            auto* ls = dynamic_cast<BSLightingShaderProperty*>(a_shader);
+            if (!ls) {
+                return false;
+            }
+            const auto t = ls->GetShaderType();
+            return t == BSLSP_FACE || t == BSLSP_SKINTINT || t == BSLSP_HAIRTINT;
+        }
+
+        // Calls a_fn on every texture path string of every armour shape.
+        // a_own clones a shared texture set first (only when writing).
+        template <class Fn>
+        void ForEachArmourTexture(NifFile& a_nif, bool a_own, Fn&& a_fn) {
+            for (auto* shape : ShapesInOrder(a_nif)) {
+                auto* ref = shape->ShaderPropertyRef();
+                if (!ref || ref->IsEmpty()) {
+                    continue;
+                }
+                auto* shader = a_nif.GetHeader().GetBlock<NiShader>(*ref);
+                if (!shader || IsSkinShader(shader)) {
+                    continue;
+                }
+                if (auto* fx = dynamic_cast<BSEffectShaderProperty*>(shader)) {
+                    a_fn(fx->sourceTexture.get());
+                    a_fn(fx->greyscaleTexture.get());
+                    a_fn(fx->envMapTexture.get());
+                    a_fn(fx->normalTexture.get());
+                    a_fn(fx->envMaskTexture.get());
+                    continue;
+                }
+                if (!shader->HasTextureSet()) {
+                    continue;
+                }
+                BSShaderTextureSet* ts =
+                    a_own ? OwnTextureSet(a_nif, shader)
+                          : a_nif.GetHeader().GetBlock<BSShaderTextureSet>(*shader->TextureSetRef());
+                if (!ts) {
+                    continue;
+                }
+                for (auto& t : ts->textures) {
+                    a_fn(t.get());
+                }
+            }
+        }
+    }
+
+    std::vector<std::string> LocalizableTextures(const std::vector<std::uint8_t>& a_nif) {
+        NifFile                  nif;
+        std::string              err;
+        std::vector<std::string> out;
+        if (!LoadBytes(nif, a_nif, err)) {
+            return out;
+        }
+        std::set<std::string> seen;
+        ForEachArmourTexture(nif, false, [&](std::string& a_path) {
+            const auto key = ArmorExportModel::TextureKey(a_path);
+            if (!key.empty() && seen.insert(key).second) {
+                out.push_back(a_path);
+            }
+        });
+        return out;
+    }
+
+    Result Localize(const std::vector<std::uint8_t>& a_nif, const std::map<std::string, std::string>& a_map) {
+        Result  r;
+        NifFile nif;
+        if (!LoadBytes(nif, a_nif, r.error)) {
+            return r;
+        }
+        r.shapes = static_cast<int>(ShapesInOrder(nif).size());
+        ForEachArmourTexture(nif, true, [&](std::string& a_path) {
+            const auto key = ArmorExportModel::TextureKey(a_path);
+            if (key.empty()) {
+                return;
+            }
+            if (const auto it = a_map.find(key); it != a_map.end() && it->second != a_path) {
+                a_path = it->second;
+                ++r.remapped;
+            }
+        });
+        r.ok = SaveBytes(nif, r.bytes, r.error);
+        return r;
+    }
+
     std::vector<std::string> ShapeNames(const std::vector<std::uint8_t>& a_nif) {
         NifFile     nif;
         std::string err;
