@@ -111,8 +111,16 @@ namespace OS::ArmorExportModel {
     // Dye textures are named by DyeTexture with the cache key
     // "<identity>|<colour>|...|<quality>", where identity is the source
     // texture's own name (its path). These pull that apart.
+    // ⚠ THE QUALITY SUFFIX IS REQUIRED, not just a bar: OverlayBake names its
+    // own scratch textures "<handle>|<node>", and those are not dyes.
     [[nodiscard]] inline bool IsDyeTextureName(std::string_view a_name) {
-        return a_name.find('|') != std::string_view::npos;
+        return a_name.find('|') != std::string_view::npos &&
+               (detail::EndsWithI(a_name, "|c") || detail::EndsWithI(a_name, "|p"));
+    }
+    // RaceMenu injects skin overlays into worn armour as extra geometry named
+    // "[Ovl#]"/"[SOvl#]". They are not in the mesh file.
+    [[nodiscard]] inline bool IsInjectedOverlayName(std::string_view a_name) {
+        return a_name.starts_with("[Ovl") || a_name.starts_with("[SOvl");
     }
     [[nodiscard]] inline std::string DyeIdentity(std::string_view a_name) {
         const auto bar = a_name.find('|');

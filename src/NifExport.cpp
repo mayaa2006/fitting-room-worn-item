@@ -150,7 +150,14 @@ namespace OS::NifExport {
                     }
                 }
             }
-            if (!target && e.order >= 0 && e.order < static_cast<int>(shapes.size())) {
+            // ⚠ POSITION ONLY WHEN THE NAME CANNOT DECIDE (blank, or not
+            // unique). A name the file simply does not have is geometry the
+            // engine added at runtime, and matching it by position would put
+            // its textures on a real shape.
+            const bool nameUndecidable =
+                e.name.empty() || editNames[e.name] > 1 || fileNames[e.name] > 1;
+            if (!target && nameUndecidable && e.order >= 0 &&
+                e.order < static_cast<int>(shapes.size())) {
                 target = shapes[static_cast<std::size_t>(e.order)];
             }
             if (!target) {

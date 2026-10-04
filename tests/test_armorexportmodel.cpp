@@ -45,6 +45,9 @@ int main() {
         CHECK(DyeIdentity("textures\\armor\\x.dds|FF0000|c") == "textures\\armor\\x.dds");
         CHECK(DyeIdentity("plain").empty());
         CHECK(IsDyePreviewName("x|FF0000|p"));
+        CHECK(!IsDyeTextureName("00ABCDEF|NPC Head"));  // an OverlayBake scratch name
+        CHECK(IsInjectedOverlayName("[Ovl3]") && IsInjectedOverlayName("[SOvl0]"));
+        CHECK(!IsInjectedOverlayName("Cuirass"));
         CHECK(!IsDyePreviewName("x|FF0000|c"));
     }
     {  // Names.

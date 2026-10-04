@@ -9,7 +9,10 @@
 #include <d3d11.h>
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -99,8 +102,14 @@ namespace OS::ArmorExport {
             int                      previews{ 0 };
         };
 
-        std::mutex           g_jobLock;
-        std::shared_ptr<Job> g_awaitingReadback;
+        // Readback handoff, one texture at a time: the worker names the bake it
+        // wants and waits; the render-thread pump copies it and signals. One
+        // texture in memory at a time, however many the outfit has.
+        std::mutex              g_rbLock;
+        std::condition_variable g_rbCv;
+        Bake* g_rbWanted = nullptr;
+        bool  g_rbDone   = false;
+        bool  g_rbOk     = false;
 
         // ---- small helpers ---------------------------------------------------
 
@@ -228,6 +237,10 @@ namespace OS::ArmorExport {
             int order = -1;
             RE::BSVisit::TraverseScenegraphGeometries(
                 a_obj.partClone.get(), [&](RE::BSGeometry* a_geom) -> RE::BSVisit::BSVisitControl {
+                    const char* gname = a_geom->name.c_str();
+                    if (gname && M::IsInjectedOverlayName(gname)) {
+                        return RE::BSVisit::BSVisitControl::kContinue;  // not in the mesh file
+                    }
                     ++order;
                     auto* mat = MaterialOf(a_geom);
                     if (!mat) {
@@ -341,6 +354,8 @@ namespace OS::ArmorExport {
             a_item.addons.push_back(std::move(ad));
         }
 
+        void Worker(std::shared_ptr<Job> a_job);
+
         void Gather(Request a_req) {
             auto job        = std::make_shared<Job>();
             job->pluginName = M::SafeName(a_req.pluginName, 48, "Fitting Room Armor");
@@ -364,6 +379,17 @@ namespace OS::ArmorExport {
                 Finish(false, "\"" + job->pluginName +
                                   ".esp\" is loaded right now, so it cannot be replaced. Pick a new name.");
                 return;
+            }
+            {
+                // Never overwrite an earlier export: its items may be in saves.
+                std::error_code ec;
+                if (fs::exists(fs::path("Data") / (job->pluginName + ".esp"), ec) ||
+                    fs::exists(fs::path("Data\\meshes\\FittingRoom\\Armor") / job->stem, ec) ||
+                    fs::exists(fs::path("Data\\textures\\FittingRoom\\Armor") / job->stem, ec)) {
+                    Finish(false, "An export named \"" + job->pluginName +
+                                      "\" already exists. Pick a new plugin name.");
+                    return;
+                }
             }
             const auto sex = base->GetSex() == RE::SEX::kFemale ? RE::SEX::kFemale : RE::SEX::kMale;
 
@@ -412,6 +438,10 @@ namespace OS::ArmorExport {
                 if (item.addons.empty()) {
                     continue;
                 }
+                // The body piece is the merge's base, so its root extra data
+                // (body morph and physics links) is the one that survives.
+                std::stable_partition(item.addons.begin(), item.addons.end(),
+                                      [](const Addon& a) { return (a.slots & M::kBodyBit) != 0; });
                 if (mainArmo) {
                     item.worldModel = ModelOf(mainArmo->worldModels[sex]);
                     if (item.worldModel.empty()) {
@@ -478,8 +508,7 @@ namespace OS::ArmorExport {
             }
 
             SetStatus(job->bakes.empty() ? "Writing files..." : "Copying the dyed textures...");
-            std::scoped_lock l(g_jobLock);
-            g_awaitingReadback = std::move(job);
+            std::thread([job] { Worker(job); }).detach();
         }
 
         // ---- Worker ----------------------------------------------------------
@@ -585,26 +614,69 @@ namespace OS::ArmorExport {
             return true;
         }
 
+        // Worker side of the readback handoff. False if the render thread did
+        // not get to it in time (the pump only runs while FLICK renders).
+        bool RequestReadback(Bake& a_b) {
+            std::unique_lock l(g_rbLock);
+            g_rbWanted = &a_b;
+            g_rbDone   = false;
+            g_rbOk     = false;
+            if (!g_rbCv.wait_for(l, std::chrono::seconds(20), [] { return g_rbDone; })) {
+                g_rbWanted = nullptr;
+                spdlog::warn("ArmorExport: the render thread never picked up {}.", a_b.file);
+                return false;
+            }
+            return g_rbOk;
+        }
+
         void Worker(std::shared_ptr<Job> a_job) {
             auto& job = *a_job;
             try {
-                // 1. Textures.
-                int n = 0;
+                // 1. Textures, one at a time: read back on the render thread,
+                // compress and write here, free, next.
+                int                   n = 0;
+                std::set<std::string> failed;  // NIF paths of bakes that did not land
                 for (auto& b : job.bakes) {
                     ++n;
-                    if (!b.read) {
-                        job.notes.push_back("a dyed texture could not be read back and stays undyed");
-                        continue;
-                    }
-                    SetStatus("Compressing dyed texture " + std::to_string(n) + " of " +
-                              std::to_string(job.bakes.size()) + "...");
+                    const auto of = std::to_string(n) + " of " + std::to_string(job.bakes.size());
+                    SetStatus("Copying dyed texture " + of + "...");
+                    b.read = RequestReadback(b);
                     std::string err;
-                    if (!WriteDds(b, err)) {
-                        Finish(false, err);
-                        return;
+                    if (!b.read) {
+                        failed.insert(b.nifPath);
+                        job.notes.push_back("a dyed texture could not be copied and stays undyed");
+                    } else {
+                        SetStatus("Compressing dyed texture " + of + "...");
+                        if (!WriteDds(b, err)) {
+                            failed.insert(b.nifPath);
+                            job.notes.push_back(err);
+                        }
                     }
                     b.mips.clear();
                     b.mips.shrink_to_fit();
+                }
+                // The textures were only held for the copy. Let them go on the
+                // game thread, where every other reference to them is dropped.
+                {
+                    std::vector<RE::NiPointer<RE::NiSourceTexture>> held;
+                    for (auto& b : job.bakes) {
+                        held.push_back(std::move(b.texture));
+                    }
+                    if (auto* task = SKSE::GetTaskInterface()) {
+                        task->AddTask([h = std::move(held)]() mutable { h.clear(); });
+                    }
+                }
+                // A mesh must never name a texture that was not written: drop
+                // those slots, so they keep the original (undyed) texture.
+                if (!failed.empty()) {
+                    for (auto& item : job.items) {
+                        for (auto& ad : item.addons) {
+                            for (auto& e : ad.edits) {
+                                std::erase_if(e.textures, [&](const auto& kv) { return failed.contains(kv.second); });
+                            }
+                        }
+                        std::erase_if(item.remap, [&](const auto& kv) { return failed.contains(kv.second); });
+                    }
                 }
 
                 // 2. Meshes.
@@ -626,6 +698,7 @@ namespace OS::ArmorExport {
                         anyPair ? std::vector<std::string>{ "_0", "_1" } : std::vector<std::string>{ "" };
                     std::string modelPath;
                     std::string err;
+                    std::size_t wroteVariants = 0;
                     for (const auto& v : variants) {
                         std::vector<std::uint8_t> bytes;
                         if (!BuildNif(item, v, false, bytes, job.notes, err)) {
@@ -640,26 +713,38 @@ namespace OS::ArmorExport {
                             Finish(false, err);
                             return;
                         }
+                        ++wroteVariants;
+                    }
+                    if (wroteVariants == variants.size()) {
                         modelPath = meshRel + label + (anyPair ? "_1" : "") + ".nif";
                     }
                     if (modelPath.empty()) {
                         job.notes.push_back(label + " had no readable mesh and was left out");
                         continue;
                     }
+                    // First person, in the same weight variants as the third
+                    // person model, since the record's weight slider covers both.
                     std::string first;
                     {
-                        std::vector<std::uint8_t> bytes;
-                        if (!BuildNif(item, anyPair ? "_1" : "", true, bytes, job.notes, err)) {
-                            Finish(false, err);
-                            return;
-                        }
-                        if (!bytes.empty()) {
-                            const auto rel = meshRel + label + "_1stPerson.nif";
+                        std::size_t wrote1st = 0;
+                        for (const auto& v : variants) {
+                            std::vector<std::uint8_t> bytes;
+                            if (!BuildNif(item, v, true, bytes, job.notes, err)) {
+                                Finish(false, err);
+                                return;
+                            }
+                            if (bytes.empty()) {
+                                break;
+                            }
+                            const auto rel = meshRel + label + "_1stPerson" + v + ".nif";
                             if (!WriteFile(fs::path("Data\\meshes\\" + rel), bytes, err)) {
                                 Finish(false, err);
                                 return;
                             }
-                            first = rel;
+                            ++wrote1st;
+                        }
+                        if (wrote1st == variants.size()) {
+                            first = meshRel + label + "_1stPerson" + (anyPair ? "_1" : "") + ".nif";
                         }
                     }
 
@@ -673,7 +758,7 @@ namespace OS::ArmorExport {
                     arma.edid            = edid + "AA";
                     arma.slots           = item.slots;
                     arma.armorType       = type;
-                    arma.race            = main.race;
+                    arma.race            = main.race.Empty() ? job.defaultRace : main.race;
                     arma.additionalRaces = main.additionalRaces;
                     // Every addon's races, so a merged torso fits whoever any
                     // of its pieces fitted.
@@ -701,7 +786,9 @@ namespace OS::ArmorExport {
                     EspWriter::Armo armo;
                     armo.id            = nextId;
                     armo.edid          = edid;
-                    armo.name          = ToCp1252(item.settings.name);
+                    armo.name          = ToCp1252(item.settings.name.empty()
+                                                              ? std::string(M::BucketNoun(item.bucket, item.settings.type))
+                                                              : item.settings.name);
                     armo.worldModel[0] = armo.worldModel[1] = M::RecordModelPath(item.worldModel);
                     if (item.worldModel.empty()) {
                         armo.worldModel[0] = armo.worldModel[1] = modelPath;
@@ -916,32 +1003,34 @@ namespace OS::ArmorExport {
     }
 
     void PumpRenderThread() {
-        std::shared_ptr<Job> job;
-        {
-            std::scoped_lock l(g_jobLock);
-            if (!g_awaitingReadback) {
-                return;
-            }
-            job = std::move(g_awaitingReadback);
-            g_awaitingReadback.reset();
+        std::unique_lock l(g_rbLock);
+        if (!g_rbWanted || g_rbDone) {
+            return;
         }
-        auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
-        auto* dev      = renderer ? reinterpret_cast<ID3D11Device*>(renderer->GetRuntimeData().forwarder) : nullptr;
-        auto* ctx      = renderer ? reinterpret_cast<ID3D11DeviceContext*>(renderer->GetRuntimeData().context) : nullptr;
-        std::vector<RE::NiPointer<RE::NiSourceTexture>> release;
-        for (auto& b : job->bakes) {
-            b.read = dev && ctx && ReadBack(dev, ctx, b);
-            if (!b.read) {
-                spdlog::warn("ArmorExport: readback failed for {}.", b.file);
-            }
-            release.push_back(std::move(b.texture));
+        // The worker is blocked in RequestReadback holding nothing but its
+        // wait, so the bake it named is stable until we signal.
+        Bake& b  = *g_rbWanted;
+        bool  ok = false;
+        try {
+            auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
+            auto* dev = renderer ? reinterpret_cast<ID3D11Device*>(renderer->GetRuntimeData().forwarder) : nullptr;
+            auto* ctx = renderer ? reinterpret_cast<ID3D11DeviceContext*>(renderer->GetRuntimeData().context)
+                                 : nullptr;
+            ok = dev && ctx && ReadBack(dev, ctx, b);
+        } catch (...) {
+            // Out of memory on a huge texture, most likely. That texture stays
+            // undyed; the export goes on.
+            b.mips.clear();
+            ok = false;
         }
-        // The textures were only held for this copy. Let them go on the game
-        // thread, where every other reference to them is dropped.
-        if (auto* task = SKSE::GetTaskInterface()) {
-            task->AddTask([held = std::move(release)]() mutable { held.clear(); });
+        if (!ok) {
+            spdlog::warn("ArmorExport: readback failed for {}.", b.file);
         }
-        std::thread([job] { Worker(job); }).detach();
+        g_rbOk     = ok;
+        g_rbDone   = true;
+        g_rbWanted = nullptr;
+        l.unlock();
+        g_rbCv.notify_all();
     }
 
 }  // namespace OS::ArmorExport

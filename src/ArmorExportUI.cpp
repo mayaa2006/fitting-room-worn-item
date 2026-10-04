@@ -131,12 +131,16 @@ namespace OS::ArmorExportUI {
         }
         FUCK::EndDisabled();
         FUCK::SameLine();
-        FUCK::BeginDisabled(status.busy);
-        if (ChamferPanel::Button(status.finished ? "Done" : "Cancel").clicked) {
-            ArmorExport::Acknowledge();
+        // Never disabled: a long export (big textures compress slowly) keeps
+        // running in the background, and its result is in the log and shown
+        // here again when the window is reopened.
+        const char* closeLabel = status.busy ? "Close (keeps working)" : (status.finished ? "Done" : "Cancel");
+        if (ChamferPanel::Button(closeLabel).clicked) {
+            if (!status.busy) {
+                ArmorExport::Acknowledge();
+            }
             FUCK::CloseCurrentPopup();
         }
-        FUCK::EndDisabled();
         FUCK::EndPopup();
     }
 

@@ -107,6 +107,19 @@ int main() {
         CHECK(after.size() > 1 && after[1] == "textures\\x_n.dds");
     }
 
+    {  // A name the file does not have is runtime geometry (a RaceMenu
+       // overlay, say): it must NOT fall back to its position.
+        ShapeEdit e;
+        e.name        = "[Ovl0]";
+        e.order       = target;
+        e.textures[0] = "textures\\wrong.dds";
+        const auto r = Rewrite(skinned, { e }, {});
+        CHECK(r.ok);
+        CHECK(r.edited == 0);
+        CHECK(r.unmatched == 1);
+        CHECK(TexturePaths(r.bytes, target) == before);
+    }
+
     {  // The remap rewrites any slot whose path matches, whatever its case,
        // slashes or "textures\" prefix.
         std::string orig;
