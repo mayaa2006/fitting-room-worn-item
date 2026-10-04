@@ -1,6 +1,7 @@
 #include "PCH.h"
 
 #include "EditorWindow.h"
+#include "ArmorExport.h"  // "Make real armor" readback pump (addon)
 
 #include "DirectEntry.h"  // the summoned host, dismissed on close
 
@@ -725,6 +726,7 @@ namespace {
             // save load can drive with the editor shut, so it must not be gated
             // on the window either.
             OS::OverlayBake::Pump();
+            OS::ArmorExport::PumpRenderThread();  // "Make real armor" readback (addon)
             static std::atomic<bool> s_said{ false };
             if (!open_.load(std::memory_order_relaxed) &&
                 !s_said.exchange(true, std::memory_order_relaxed)) {
@@ -895,6 +897,7 @@ namespace {
             // game thread and needs nothing from here.
             OS::DyeTexture::Pump();
             OS::OverlayBake::Pump();
+            OS::ArmorExport::PumpRenderThread();  // "Make real armor" readback (addon)
 
             // ⚠ PROBE (field 2026-08-27): "the top and bottom we have ugly
             // bits where the panel isn't full vertical so we have an awkward

@@ -103,6 +103,15 @@ find_package(directxtex CONFIG REQUIRED)
 # because the baseline predates the safetyhook port.
 find_package(safetyhook CONFIG REQUIRED)
 
+# "Make real armor" export (addon): nifly, the GPL-3.0 NIF library Outfit
+# Studio is built on, pinned as a submodule (extern/nifly). Its own tests stay
+# out (they only build when nifly is the top-level project). The preset's
+# /we4062 is this mod's rule, not nifly's, same reasoning as CommonLibSSE.
+add_subdirectory(extern/nifly EXCLUDE_FROM_ALL)
+if(MSVC)
+    target_compile_options(nifly PRIVATE /wd4062 /W3)
+endif()
+
 # ⚠ A CRASH LOG THAT CANNOT NAME OUR BUILD COSTS A DIAGNOSIS. This puts the
 # version into the DLL itself, so Crash Logger and Trainwreck print it beside
 # our name like every other plugin. Generated from project() so it cannot
@@ -428,6 +437,14 @@ add_commonlibsse_plugin(${PROJECT_NAME}
         src/SettingsUI.cpp
         src/RuleModel.h
         src/FollowerMirror.h
+        src/ArmorExportModel.h
+        src/EspWriter.h
+        src/NifExport.h
+        src/NifExport.cpp
+        src/ArmorExport.h
+        src/ArmorExport.cpp
+        src/ArmorExportUI.h
+        src/ArmorExportUI.cpp
         src/RuleEngine.h
         src/RuleEngine.cpp
         src/RuleCodec.h
@@ -473,6 +490,9 @@ endif()
 
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_23)
 target_precompile_headers(${PROJECT_NAME} PRIVATE src/PCH.h)
+# NifExport.cpp speaks nifly and stays engine-free (it also builds into
+# NifExportTests), so it does not take the CommonLib/Windows PCH.
+set_source_files_properties(src/NifExport.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 # extern/ holds the vendored FUCK API header (FUCK_API.h, soft dependency,
 # resolved at runtime via RequestFUCK / GetProcAddress - no link-time coupling).
 target_include_directories(${PROJECT_NAME} PRIVATE extern)
@@ -484,6 +504,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE extern)
 target_link_libraries(${PROJECT_NAME} PRIVATE JsonCpp::JsonCpp imgui::imgui
                                               safetyhook::safetyhook
                                               Microsoft::DirectXTex
+                                              nifly
                                               d3d11 dxgi d3dcompiler windowscodecs)
 if(FR_BODY_STUDIO)
     target_link_libraries(${PROJECT_NAME} PRIVATE tinyxml2::tinyxml2)
@@ -1176,6 +1197,23 @@ target_include_directories(PresetTooltipTests PRIVATE src)
 add_executable(RuleModelTests tests/test_rulemodel.cpp)
 target_compile_features(RuleModelTests PRIVATE cxx_std_23)
 target_include_directories(RuleModelTests PRIVATE src)
+
+# "Make real armor" export tests (addon): the plugin writer, the helpers, and
+# the NIF rewrite/merge run against nifly's own Skyrim SE sample meshes.
+add_executable(EspWriterTests tests/test_espwriter.cpp)
+target_compile_features(EspWriterTests PRIVATE cxx_std_23)
+target_include_directories(EspWriterTests PRIVATE src)
+
+add_executable(ArmorExportModelTests tests/test_armorexportmodel.cpp)
+target_compile_features(ArmorExportModelTests PRIVATE cxx_std_23)
+target_include_directories(ArmorExportModelTests PRIVATE src)
+
+add_executable(NifExportTests tests/test_nifexport.cpp src/NifExport.cpp)
+target_compile_features(NifExportTests PRIVATE cxx_std_23)
+target_include_directories(NifExportTests PRIVATE src)
+target_link_libraries(NifExportTests PRIVATE nifly)
+target_compile_definitions(NifExportTests PRIVATE
+    NIFLY_TEST_INPUT="${CMAKE_CURRENT_SOURCE_DIR}/extern/nifly/tests/input")
 
 # Pure-logic follower mirroring tests (addon): which follower outfit a rule's
 # base maps to, and what that does to her library.

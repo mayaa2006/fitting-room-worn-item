@@ -87,6 +87,7 @@
 #include "UndoRedoKeys.h"  // Ctrl+Z, Ctrl+Shift+Z and Ctrl+Y, shared with every other page
 #include "WeaponSlots.h"
 #include "WorldWatch.h"
+#include "ArmorExportUI.h"  // "Make real armor" (addon)
 
 #if defined(FR_BODY_STUDIO)
 #include "BodyMeshPath.h"
@@ -16871,8 +16872,21 @@ namespace OS::EditorUI {
                 requestDeletePopup = true;
             }
             FUCK::EndDisabled();
+
+            // "Make real armor" (addon). Only for the outfit being shown on the
+            // player: the export reads the meshes and dyed textures straight off
+            // the character, so a tab that is not on screen has nothing to read.
+            FUCK::Separator();
+            FUCK::BeginDisabled(!subject || g_tabMenuOutfit != snap.ActiveIndex() ||
+                                !TargetIsPlayer());
+            if (OS::ui::ContextMenuItem("Make real armor...")) {
+                ArmorExportUI::Open(g_staged);
+            }
+            FUCK::EndDisabled();
             OS::ui::EndContextMenu();
         }
+        // At window scope, beside the editor's other modals (see above).
+        ArmorExportUI::Draw();
 
         // ---- the add button's right-click menu ------------------------------
         //

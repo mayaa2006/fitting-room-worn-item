@@ -2,3 +2,6 @@
 	path = extern/CommonLibSSE-NG
 	url = https://github.com/alandtse/CommonLibSSE-NG.git
 	branch = ng
+[submodule "extern/nifly"]
+	path = extern/nifly
+	url = https://github.com/ousnius/nifly.git
