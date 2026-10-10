@@ -3,6 +3,7 @@
 #include "AdvancedCondition.h"
 #include "CrashGuard.h"
 #include "OutfitSession.h"
+#include "PieceMorphs.h"  // addon: live per-piece body morphs
 #include "MakeupApi.h"         // ReassertSkinTone: the held tone, between head builds
 #include "OverlayApi.h"        // RunNodePropertyPush: the layers a skin repaint took
 #include "OverlayReconcile.h"  // OS-233: Tick, the repair's armed check
@@ -1459,6 +1460,9 @@ namespace OS::WorldWatch {
             // lift back once the rebuild has finished. Silent unless a rebuild
             // armed it, and a no-op when the key survived.
             OutfitSession::RunPushUpReassert();
+            // Live per-piece morphs (addon): relink newly attached pieces and
+            // keep their values on. Throttled inside; free with no settings.
+            PieceMorphs::Tick(player);
             if (!player || !player->Get3D()) {
                 // Same gate Evaluate uses. Forget the baseline too, so the first
                 // sample after a load is treated as a baseline rather than as a

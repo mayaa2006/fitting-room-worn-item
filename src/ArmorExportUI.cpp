@@ -3,8 +3,9 @@
 #include "ArmorExport.h"
 #include "ChamferPanel.h"
 #include "FuckCompat.h"
+#include "MorphSlidersUI.h"
+#include "PieceMorphs.h"
 
-#include <cctype>
 #include <chrono>
 #include <future>
 #include <string>
@@ -42,26 +43,10 @@ namespace OS::ArmorExportUI {
             }
         }
 
-        bool Contains(const std::string& a_hay, const std::string& a_needle) {
-            if (a_needle.empty()) {
-                return true;
-            }
-            const auto lower = [](std::string x) {
-                for (auto& c : x) {
-                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                }
-                return x;
-            };
-            return lower(a_hay).find(lower(a_needle)) != std::string::npos;
-        }
-
         // One piece's morph list. a_values is that piece's name -> value map.
         void DrawPieceMorphs(std::size_t a_item, std::size_t a_piece, const std::string& a_pieceName,
                              std::map<std::string, float>& a_values, float a_em) {
-            std::size_t changed = 0;
-            for (const auto& [n, v] : a_values) {
-                changed += v != 0.0f ? 1 : 0;
-            }
+            const std::size_t changed = MorphSlidersUI::Changed(a_values);
             std::string label = "Body morphs: " + a_pieceName;
             if (changed > 0) {
                 label += " (" + std::to_string(changed) + " changed)";
@@ -88,35 +73,7 @@ namespace OS::ArmorExportUI {
                                    "Changes this piece only, on top of your body. The armor still follows "
                                    "your body sliders after this.");
                 FUCK::PopTextWrapPos();
-                auto& filter = g_filters[a_item][a_piece];
-                FUCK::SetNextItemWidth(a_em * 12.0f);
-                FUCK::InputText("Find", &filter);
-                FUCK::SameLine();
-                FUCK::BeginDisabled(changed == 0);
-                if (FUCK::Button("Reset")) {
-                    a_values.clear();
-                }
-                FUCK::EndDisabled();
-                FUCK::BeginChild("morph_rows", ImVec2(0, a_em * 12.0f), true);
-                for (const auto& n : *names) {
-                    if (!Contains(n, filter)) {
-                        continue;
-                    }
-                    const auto it  = a_values.find(n);
-                    float      pct = it == a_values.end() ? 0.0f : it->second * 100.0f;
-                    FUCK::SetNextItemWidth(a_em * 10.0f);
-                    if (FUCK::DragFloat(n.c_str(), &pct, 1.0f, -200.0f, 200.0f, "%.0f%%")) {
-                        if (pct == 0.0f) {
-                            a_values.erase(n);
-                        } else {
-                            a_values[n] = pct / 100.0f;
-                        }
-                    }
-                    if (FUCK::IsItemHovered()) {
-                        FUCK::SetTooltip("Drag to change. Zero leaves the piece as it was built.");
-                    }
-                }
-                FUCK::EndChild();
+                (void)MorphSlidersUI::Draw(*names, a_values, g_filters[a_item][a_piece], a_em);
             }
             FUCK::TreePop();
         }
@@ -131,7 +88,12 @@ namespace OS::ArmorExportUI {
         std::vector<std::vector<std::vector<std::string>>> triPaths;
         for (const auto& it : g_plan.items) {
             g_settings.push_back(it.defaults);
-            g_settings.back().morphs.assign(it.styles.size(), {});
+            // Starts from each piece's live shape (Shape pieces), so what
+            // you see on your character is what gets baked.
+            g_settings.back().morphs.clear();
+            for (const auto& key : it.styles) {
+                g_settings.back().morphs.push_back(PieceMorphs::Get(key));
+            }
             g_filters.emplace_back(it.styles.size());
             triPaths.push_back(it.triPaths);
             triPaths.back().resize(it.styles.size());

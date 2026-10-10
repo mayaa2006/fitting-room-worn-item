@@ -184,6 +184,29 @@ namespace OS::RaceMenuMorphApi {
                g_bodyMorphs->HasBodyMorphKey(AsRaceMenuRef(a_actor), kPushUpKey);
     }
 
+    ApplyResult ApplyPieceMorphs(RE::Actor* a_actor,
+                                 const std::vector<MorphValue>& a_values) {
+        if (!g_bodyMorphs || !a_actor) {
+            return {};
+        }
+        auto* refr = AsRaceMenuRef(a_actor);
+        g_bodyMorphs->ClearBodyMorphKeys(refr, kPieceKey);
+        std::size_t applied = 0;
+        for (const auto& morph : a_values) {
+            if (morph.name.empty() || morph.value == 0.0f) {
+                continue;
+            }
+            g_bodyMorphs->SetMorph(refr, morph.name.c_str(), kPieceKey, morph.value);
+            ++applied;
+        }
+        return Refresh(*g_bodyMorphs, a_actor, applied);
+    }
+
+    bool HasPieceMorphs(RE::Actor* a_actor) {
+        return g_bodyMorphs && a_actor &&
+               g_bodyMorphs->HasBodyMorphKey(AsRaceMenuRef(a_actor), kPieceKey);
+    }
+
     namespace {
 
         // ⚠ TWO READS AND NOT ONE. Present at the first and gone at the second

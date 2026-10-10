@@ -41,6 +41,11 @@ namespace OS::RaceMenuMorphApi {
     // RaceMenu sums them.
     inline constexpr const char* kPushUpKey = "FittingRoom.PushUp";
 
+    // Live per-piece morphs' key (addon, PieceMorphs.h). Every name written
+    // under it carries a piece's own prefix and exists only in that piece's
+    // tri copy, so nothing but that piece can move with it.
+    inline constexpr const char* kPieceKey = "FittingRoom.PieceMorph";
+
     struct MorphValue {
         std::string name;
         float       value{ 0.0f };
@@ -98,6 +103,12 @@ namespace OS::RaceMenuMorphApi {
     [[nodiscard]] ApplyResult ApplyPushUp(RE::Actor* a_actor,
                                           const std::vector<MorphValue>& a_values);
     [[nodiscard]] bool        HasPushUp(RE::Actor* a_actor);
+
+    // The same clear-and-rewrite on kPieceKey, always followed by one refresh
+    // (a piece whose tri link just changed needs it even with no new value).
+    [[nodiscard]] ApplyResult ApplyPieceMorphs(RE::Actor* a_actor,
+                                               const std::vector<MorphValue>& a_values);
+    [[nodiscard]] bool        HasPieceMorphs(RE::Actor* a_actor);
 
     // ---- the push-up survival probe ------------------------------------------
     //

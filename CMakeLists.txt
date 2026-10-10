@@ -464,6 +464,14 @@ add_commonlibsse_plugin(${PROJECT_NAME}
         src/ArmorExport.cpp
         src/ArmorExportUI.h
         src/ArmorExportUI.cpp
+        src/MorphSlidersUI.h
+        src/MorphSlidersUI.cpp
+        src/TriFile.h
+        src/PieceMorphModel.h
+        src/PieceMorphs.h
+        src/PieceMorphs.cpp
+        src/PieceMorphUI.h
+        src/PieceMorphUI.cpp
         src/RuleEngine.h
         src/RuleEngine.cpp
         src/RuleCodec.h
@@ -1230,6 +1238,11 @@ target_include_directories(ArmorExportModelTests PRIVATE src)
 add_executable(TriFileTests tests/test_trifile.cpp)
 target_compile_features(TriFileTests PRIVATE cxx_std_23)
 target_include_directories(TriFileTests PRIVATE src)
+
+add_executable(PieceMorphModelTests tests/test_piecemorphmodel.cpp)
+target_compile_features(PieceMorphModelTests PRIVATE cxx_std_23)
+target_include_directories(PieceMorphModelTests PRIVATE src)
+target_link_libraries(PieceMorphModelTests PRIVATE JsonCpp::JsonCpp)
 
 add_executable(NifExportTests tests/test_nifexport.cpp src/NifExport.cpp)
 target_compile_features(NifExportTests PRIVATE cxx_std_23)

@@ -88,6 +88,7 @@
 #include "WeaponSlots.h"
 #include "WorldWatch.h"
 #include "ArmorExportUI.h"  // "Make real armor" (addon)
+#include "PieceMorphUI.h"   // "Shape pieces" (addon)
 
 #if defined(FR_BODY_STUDIO)
 #include "BodyMeshPath.h"
@@ -16879,6 +16880,9 @@ namespace OS::EditorUI {
             FUCK::Separator();
             FUCK::BeginDisabled(!subject || g_tabMenuOutfit != snap.ActiveIndex() ||
                                 !TargetIsPlayer());
+            if (OS::ui::ContextMenuItem("Shape pieces...")) {
+                PieceMorphUI::Open(g_staged);
+            }
             if (OS::ui::ContextMenuItem("Make real armor...")) {
                 ArmorExportUI::Open(g_staged);
             }
@@ -16887,6 +16891,7 @@ namespace OS::EditorUI {
         }
         // At window scope, beside the editor's other modals (see above).
         ArmorExportUI::Draw();
+        PieceMorphUI::Draw();
 
         // ---- the add button's right-click menu ------------------------------
         //
