@@ -3,6 +3,9 @@
 #include "ArmorExportModel.h"
 #include "NifExport.h"
 
+#include <array>
+#include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <iterator>
@@ -207,12 +210,139 @@ int main() {
         CHECK(none.ok && none.remapped == 0);
     }
 
+    {  // Merge reports where every shape went.
+        const auto a = ShapeNames(skinned);
+        const auto self = Merge({ skinned, skinned });
+        CHECK(self.ok && self.names.size() == 2);
+        if (self.names.size() == 2) {
+            for (const auto& n : a) {
+                CHECK(self.names[0].count(n) && self.names[0].at(n) == n);
+                CHECK(self.names[1].count(n) && self.names[1].at(n) != n);
+            }
+            const auto mn = ShapeNames(self.bytes);
+            for (const auto& [from, to] : self.names[1]) {
+                bool present = false;
+                for (const auto& m : mn) {
+                    present = present || m == to;
+                }
+                CHECK(present);
+            }
+        }
+        const auto one = Merge({ skinned });
+        CHECK(one.names.size() == 1 && one.names[0].size() == a.size());
+    }
+
+    {  // BODYTRI: set, replace, read, remove; shapes untouched.
+        const auto linked = SetBodyTri(skinned, "FittingRoom\\Armor\\T\\Torso.tri");
+        CHECK(linked.ok);
+        CHECK(BodyTriPath(linked.bytes) == "FittingRoom\\Armor\\T\\Torso.tri");
+        CHECK(ShapeNames(linked.bytes) == names);
+        const auto again = SetBodyTri(linked.bytes, "Other\\X.tri");
+        CHECK(again.ok && again.remapped == 1);
+        CHECK(BodyTriPath(again.bytes) == "Other\\X.tri");
+        const auto gone = SetBodyTri(again.bytes, "");
+        CHECK(gone.ok && BodyTriPath(gone.bytes).empty());
+        CHECK(ShapeNames(gone.bytes) == names);
+        // A merged file whose second part was linked keeps only the new link.
+        const auto m = Merge({ skinned, linked.bytes });
+        CHECK(m.ok && m.droppedTri == 1 && m.droppedPhysics == 0);
+        const auto relinked = SetBodyTri(m.bytes, "FittingRoom\\Armor\\T\\Torso.tri");
+        CHECK(relinked.ok && BodyTriPath(relinked.bytes) == "FittingRoom\\Armor\\T\\Torso.tri");
+    }
+
+    {  // Morph bake: only the named shape's listed vertices move, by
+       // value * multiplier * delta, and the result survives save + reload.
+        const int  shape  = target;
+        const auto before = Vertices(skinned, shape);
+        CHECK(before.size() > 10);
+        int other = -1;
+        for (int i = 0; i < static_cast<int>(names.size()); ++i) {
+            if (i != shape && names[static_cast<std::size_t>(i)] != names[static_cast<std::size_t>(shape)] &&
+                Vertices(skinned, i).size() > 0) {
+                other = i;
+                break;
+            }
+        }
+        const auto otherBefore = other >= 0 ? Vertices(skinned, other) : std::vector<std::array<float, 3>>{};
+
+        OS::TriFile::File tri;
+        OS::TriFile::Shape ts;
+        // Different case from the file's name: the engine compares case-blind.
+        ts.name = names[static_cast<std::size_t>(shape)];
+        for (auto& c : ts.name) {
+            c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        }
+        OS::TriFile::Morph mo;
+        mo.name       = "Breasts";
+        mo.multiplier = 0.01f;
+        mo.deltas     = { { 0, 100, 0, -50 }, { 5, 0, 200, 0 }, { 65535, 100, 100, 100 } };
+        ts.morphs.push_back(mo);
+        OS::TriFile::Morph unused;
+        unused.name       = "Butt";
+        unused.multiplier = 1.0f;
+        unused.deltas     = { { 1, 100, 100, 100 } };
+        ts.morphs.push_back(unused);
+        tri.push_back(ts);
+        OS::TriFile::Shape missing;
+        missing.name = "NoSuchShape";
+        tri.push_back(missing);
+
+        const auto r = ApplyMorphs(skinned, tri, { { "Breasts", 0.5f } });
+        CHECK(r.ok);
+        CHECK(r.edited == 1);
+        CHECK(r.unmatched == 1);
+        const auto after = Vertices(r.bytes, shape);
+        CHECK(after.size() == before.size());
+        if (after.size() == before.size() && before.size() > 10) {
+            auto near = [](float x, float y) { return std::fabs(x - y) < 1e-3f; };
+            CHECK(near(after[0][0], before[0][0] + 0.5f));
+            CHECK(near(after[0][1], before[0][1]));
+            CHECK(near(after[0][2], before[0][2] - 0.25f));
+            CHECK(near(after[5][1], before[5][1] + 1.0f));
+            CHECK(near(after[1][0], before[1][0]));  // "Butt" had no value
+            for (std::size_t i = 6; i < before.size(); ++i) {
+                CHECK(after[i] == before[i]);
+            }
+        }
+        if (other >= 0) {
+            CHECK(Vertices(r.bytes, other) == otherBefore);
+        }
+        CHECK(ShapeNames(r.bytes) == names);
+        // A second pass on the baked file adds on top (a reload round trip).
+        const auto twice = ApplyMorphs(r.bytes, tri, { { "Breasts", 0.5f } });
+        CHECK(twice.ok);
+        const auto t2 = Vertices(twice.bytes, shape);
+        if (t2.size() == before.size() && !before.empty()) {
+            CHECK(std::fabs(t2[0][0] - (before[0][0] + 1.0f)) < 1e-3f);
+        }
+        // No value that the tri knows: nothing moves.
+        const auto none = ApplyMorphs(skinned, tri, { { "Thighs", 1.0f } });
+        CHECK(none.ok && none.edited == 0);
+        CHECK(Vertices(none.bytes, shape) == before);
+        // Merging after the bake keeps the moved vertices.
+        const auto m = Merge({ dynamic, r.bytes });
+        CHECK(m.ok && m.names.size() == 2);
+        if (m.ok && m.names.size() == 2) {
+            const auto merged = ShapeNames(m.bytes);
+            const auto to     = m.names[1].at(names[static_cast<std::size_t>(shape)]);
+            for (int i = 0; i < static_cast<int>(merged.size()); ++i) {
+                if (merged[static_cast<std::size_t>(i)] == to) {
+                    CHECK(Vertices(m.bytes, i) == after);
+                }
+            }
+        }
+    }
+
     {  // Garbage in is an error, not a crash.
         const auto r = Rewrite({ 1, 2, 3, 4 }, {}, {});
         CHECK(!r.ok);
         CHECK(!r.error.empty());
         const auto m = Merge({ skinned, { 9, 9, 9 } });
         CHECK(!m.ok);
+        CHECK(!ApplyMorphs({ 1, 2, 3 }, {}, {}).ok);
+        CHECK(!SetBodyTri({ 1, 2, 3 }, "x.tri").ok);
+        CHECK(BodyTriPath({ 1, 2, 3 }).empty());
+        CHECK(Vertices({ 1, 2, 3 }, 0).empty());
     }
 
     if (g_failures == 0) {

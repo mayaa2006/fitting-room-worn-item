@@ -4,7 +4,10 @@
 
 #include <NifFile.hpp>
 
+#include <cctype>
+#include <cmath>
 #include <functional>
+#include <memory>
 #include <set>
 #include <sstream>
 
@@ -242,8 +245,13 @@ namespace OS::NifExport {
             r.bytes = a_nifs.front();
             NifFile probe;
             std::string err;
+            r.names.emplace_back();
             if (LoadBytes(probe, r.bytes, err)) {
-                r.shapes = static_cast<int>(ShapesInOrder(probe).size());
+                const auto shapes = ShapesInOrder(probe);
+                r.shapes          = static_cast<int>(shapes.size());
+                for (auto* s : shapes) {
+                    r.names.back().emplace(s->name.get(), s->name.get());
+                }
             }
             return r;
         }
@@ -253,8 +261,10 @@ namespace OS::NifExport {
             return r;
         }
         std::set<std::string> taken;
+        r.names.emplace_back();
         for (auto* s : ShapesInOrder(base)) {
             taken.insert(s->name.get());
+            r.names.back().emplace(s->name.get(), s->name.get());
         }
         for (std::size_t i = 1; i < a_nifs.size(); ++i) {
             NifFile     src;
@@ -265,23 +275,27 @@ namespace OS::NifExport {
             }
             // Root extra data (a BODYTRI morph link, an SMP physics path) is
             // per FILE and only the base's survives: say so, do not hide it.
-            // Only the links that matter count: BODYTRI (body sliders) and
-            // HDT/SMP physics. BSXFlags and the like are on nearly every root.
+            // Only the links that matter count: BODYTRI (body sliders, which
+            // the caller can rebuild from Result::names) and HDT/SMP physics.
+            // BSXFlags and the like are on nearly every root.
             if (auto* root = src.GetRootNode()) {
+                bool tri = false, physics = false;
                 for (auto& ref : root->extraDataRefs) {
                     auto* xd = src.GetHeader().GetBlock<NiExtraData>(ref);
                     if (!xd) {
                         continue;
                     }
                     const std::string n = xd->name.get();
-                    if (n == "BODYTRI" || n.rfind("HDT", 0) == 0) {
-                        ++r.droppedExtra;
-                        break;
-                    }
+                    tri     = tri || n == "BODYTRI";
+                    physics = physics || n.rfind("HDT", 0) == 0;
                 }
+                r.droppedTri += tri ? 1 : 0;
+                r.droppedPhysics += physics ? 1 : 0;
             }
+            r.names.emplace_back();
             for (auto* s : ShapesInOrder(src)) {
-                std::string name = s->name.get();
+                const std::string original = s->name.get();
+                std::string name = original;
                 if (name.empty()) {
                     name = "Shape";
                 }
@@ -299,6 +313,7 @@ namespace OS::NifExport {
                     return r;
                 }
                 taken.insert(name);
+                r.names.back().emplace(original, name);
             }
         }
         r.shapes = static_cast<int>(ShapesInOrder(base).size());
@@ -427,6 +442,162 @@ namespace OS::NifExport {
         return out;
     }
 
+    namespace {
+        std::string Lower(std::string a_s) {
+            for (auto& c : a_s) {
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            }
+            return a_s;
+        }
+
+        bool IsBodyTri(NifFile& a_nif, const NiBlockRef<NiExtraData>& a_ref, std::string* a_value) {
+            auto* sd = a_nif.GetHeader().GetBlock<NiStringExtraData>(a_ref);
+            if (!sd || sd->name.get() != "BODYTRI") {
+                return false;
+            }
+            if (a_value) {
+                *a_value = sd->stringData.get();
+            }
+            return true;
+        }
+
+        // The root, then every shape: where a BODYTRI link can sit.
+        std::vector<NiAVObject*> TriHolders(NifFile& a_nif) {
+            std::vector<NiAVObject*> out;
+            if (auto* root = a_nif.GetRootNode()) {
+                out.push_back(root);
+            }
+            for (auto* s : ShapesInOrder(a_nif)) {
+                out.push_back(s);
+            }
+            return out;
+        }
+    }
+
+    std::string BodyTriPathImpl(const std::vector<std::uint8_t>& a_nif) {
+        NifFile     nif;
+        std::string err;
+        if (!LoadBytes(nif, a_nif, err)) {
+            return {};
+        }
+        for (auto* obj : TriHolders(nif)) {
+            for (auto& ref : obj->extraDataRefs) {
+                std::string v;
+                if (IsBodyTri(nif, ref, &v) && !v.empty()) {
+                    return v;
+                }
+            }
+        }
+        return {};
+    }
+
+    Result ApplyMorphsImpl(const std::vector<std::uint8_t>& a_nif, const TriFile::File& a_tri,
+                           const std::map<std::string, float>& a_values) {
+        Result  r;
+        NifFile nif;
+        if (!LoadBytes(nif, a_nif, r.error)) {
+            return r;
+        }
+        const auto shapes = ShapesInOrder(nif);
+        r.shapes          = static_cast<int>(shapes.size());
+        for (const auto& ts : a_tri) {
+            NiShape* target = nullptr;
+            for (auto* s : shapes) {
+                if (s->name.get() == ts.name) {
+                    target = s;
+                    break;
+                }
+            }
+            if (!target) {
+                const auto want = Lower(ts.name);
+                int        hits = 0;
+                for (auto* s : shapes) {
+                    if (Lower(s->name.get()) == want) {
+                        target = s;
+                        ++hits;
+                    }
+                }
+                if (hits != 1) {
+                    target = nullptr;
+                }
+            }
+            if (!target) {
+                ++r.unmatched;
+                continue;
+            }
+            std::vector<Vector3> verts;
+            if (!nif.GetVertsForShape(target, verts) || verts.empty()) {
+                continue;
+            }
+            bool moved = false;
+            for (const auto& m : ts.morphs) {
+                const auto it = a_values.find(m.name);
+                if (it == a_values.end() || it->second == 0.0f || !std::isfinite(it->second)) {
+                    continue;
+                }
+                const float v = it->second;
+                for (const auto& d : m.deltas) {
+                    if (d.index >= verts.size()) {
+                        continue;
+                    }
+                    const auto off = m.Offset(d);
+                    auto&      p   = verts[d.index];
+                    p.x += off[0] * v;
+                    p.y += off[1] * v;
+                    p.z += off[2] * v;
+                    moved = true;
+                }
+            }
+            if (moved) {
+                nif.SetVertsForShape(target, verts);
+                ++r.edited;
+            }
+        }
+        r.ok = SaveBytes(nif, r.bytes, r.error);
+        return r;
+    }
+
+    Result SetBodyTriImpl(const std::vector<std::uint8_t>& a_nif, const std::string& a_path) {
+        Result  r;
+        NifFile nif;
+        if (!LoadBytes(nif, a_nif, r.error)) {
+            return r;
+        }
+        r.shapes = static_cast<int>(ShapesInOrder(nif).size());
+        for (auto* obj : TriHolders(nif)) {
+            std::vector<std::uint32_t> at;
+            std::uint32_t              pos = 0;
+            for (auto& ref : obj->extraDataRefs) {
+                if (IsBodyTri(nif, ref, nullptr)) {
+                    at.push_back(pos);
+                }
+                ++pos;
+            }
+            // Back to front, so earlier positions stay valid. The unlinked
+            // block itself goes when the file is saved.
+            for (auto it = at.rbegin(); it != at.rend(); ++it) {
+                obj->extraDataRefs.RemoveBlockRef(*it);
+            }
+            if (!at.empty()) {
+                ++r.remapped;
+            }
+        }
+        if (!a_path.empty()) {
+            auto* root = nif.GetRootNode();
+            if (!root) {
+                r.error = "the file has no root node";
+                return r;
+            }
+            auto sd = std::make_unique<NiStringExtraData>();
+            sd->name.get()       = "BODYTRI";
+            sd->stringData.get() = a_path;
+            nif.AssignExtraData(root, std::move(sd));
+            ++r.edited;
+        }
+        r.ok = SaveBytes(nif, r.bytes, r.error);
+        return r;
+    }
+
     // ---- public entry points: nothing nifly throws gets past these ----------
 
     namespace {
@@ -464,6 +635,20 @@ namespace OS::NifExport {
     Result Localize(const std::vector<std::uint8_t>& a_nif, const std::map<std::string, std::string>& a_map) {
         return Guard([&] { return LocalizeImpl(a_nif, a_map); });
     }
+    std::string BodyTriPath(const std::vector<std::uint8_t>& a_nif) {
+        try {
+            return BodyTriPathImpl(a_nif);
+        } catch (...) {
+            return {};
+        }
+    }
+    Result ApplyMorphs(const std::vector<std::uint8_t>& a_nif, const TriFile::File& a_tri,
+                       const std::map<std::string, float>& a_values) {
+        return Guard([&] { return ApplyMorphsImpl(a_nif, a_tri, a_values); });
+    }
+    Result SetBodyTri(const std::vector<std::uint8_t>& a_nif, const std::string& a_path) {
+        return Guard([&] { return SetBodyTriImpl(a_nif, a_path); });
+    }
     std::vector<std::string> LocalizableTextures(const std::vector<std::uint8_t>& a_nif) {
         return GuardList([&] { return LocalizableTexturesImpl(a_nif); });
     }
@@ -472,6 +657,29 @@ namespace OS::NifExport {
     }
     std::vector<std::string> TexturePaths(const std::vector<std::uint8_t>& a_nif, int a_order) {
         return GuardList([&] { return TexturePathsImpl(a_nif, a_order); });
+    }
+    std::vector<std::array<float, 3>> Vertices(const std::vector<std::uint8_t>& a_nif, int a_order) {
+        try {
+            NifFile     nif;
+            std::string err;
+            std::vector<std::array<float, 3>> out;
+            if (!LoadBytes(nif, a_nif, err)) {
+                return out;
+            }
+            const auto shapes = ShapesInOrder(nif);
+            if (a_order < 0 || a_order >= static_cast<int>(shapes.size())) {
+                return out;
+            }
+            std::vector<Vector3> verts;
+            if (nif.GetVertsForShape(shapes[static_cast<std::size_t>(a_order)], verts)) {
+                for (const auto& v : verts) {
+                    out.push_back({ v.x, v.y, v.z });
+                }
+            }
+            return out;
+        } catch (...) {
+            return {};
+        }
     }
 
 }  // namespace OS::NifExport

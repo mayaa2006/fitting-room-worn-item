@@ -5,6 +5,9 @@
 // GPL-3.0 NIF library Outfit Studio uses. Engine-free: takes bytes, returns
 // bytes, so it is unit-tested off-game (tests/test_nifexport.cpp).
 
+#include "TriFile.h"
+
+#include <array>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -35,8 +38,12 @@ namespace OS::NifExport {
         int                       edited{ 0 };     // shapes an edit landed on
         int                       remapped{ 0 };   // texture slots changed by a_remap
         int                       unmatched{ 0 };  // edits that found no shape
-        int                       droppedExtra{ 0 };  // Merge: non-base files whose root extra data
-                                                      // (BODYTRI morphs, physics) could not come along
+        int                       droppedTri{ 0 };      // Merge: non-base files with a BODYTRI link
+        int                       droppedPhysics{ 0 };  // Merge: non-base files with HDT/SMP physics
+        // Merge: per input file, each shape's original name -> its name in
+        // the merged file (renamed when the name was taken). The base file's
+        // names map to themselves.
+        std::vector<std::map<std::string, std::string>> names;
         std::string               error;
     };
 
@@ -72,9 +79,31 @@ namespace OS::NifExport {
     [[nodiscard]] Result Localize(const std::vector<std::uint8_t>&          a_nif,
                                   const std::map<std::string, std::string>& a_map);
 
+    // The meshes-relative path of the file's body-slider morph file (the
+    // BODYTRI string on the root, or on any shape), or empty.
+    [[nodiscard]] std::string BodyTriPath(const std::vector<std::uint8_t>& a_nif);
+
+    // Bakes body-slider morphs into the geometry: every shape whose name
+    // matches a tri shape (exactly, else case-blind when that is unique) moves
+    // each vertex by the sum over a_values of value * that morph's offset -
+    // what RaceMenu would do with those values, frozen into the file.
+    // Out-of-range vertex indices are ignored. Result::edited counts shapes
+    // moved.
+    [[nodiscard]] Result ApplyMorphs(const std::vector<std::uint8_t>&    a_nif,
+                                     const TriFile::File&                a_tri,
+                                     const std::map<std::string, float>& a_values);
+
+    // Replaces every BODYTRI link in the file (root and shapes) with one on
+    // the root naming a_path (meshes-relative). Empty a_path only removes.
+    [[nodiscard]] Result SetBodyTri(const std::vector<std::uint8_t>& a_nif, const std::string& a_path);
+
     // Shape names in the same depth-first order Rewrite matches by. For tests
     // and diagnostics.
     [[nodiscard]] std::vector<std::string> ShapeNames(const std::vector<std::uint8_t>& a_nif);
+
+    // Vertex positions of the shape at a_order (depth-first), or empty. For
+    // tests and diagnostics.
+    [[nodiscard]] std::vector<std::array<float, 3>> Vertices(const std::vector<std::uint8_t>& a_nif, int a_order);
 
     // Texture-set paths of the shape at a_order (depth-first), or empty.
     [[nodiscard]] std::vector<std::string> TexturePaths(const std::vector<std::uint8_t>& a_nif,

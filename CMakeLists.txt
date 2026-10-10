@@ -1227,6 +1227,10 @@ add_executable(ArmorExportModelTests tests/test_armorexportmodel.cpp)
 target_compile_features(ArmorExportModelTests PRIVATE cxx_std_23)
 target_include_directories(ArmorExportModelTests PRIVATE src)
 
+add_executable(TriFileTests tests/test_trifile.cpp)
+target_compile_features(TriFileTests PRIVATE cxx_std_23)
+target_include_directories(TriFileTests PRIVATE src)
+
 add_executable(NifExportTests tests/test_nifexport.cpp src/NifExport.cpp)
 target_compile_features(NifExportTests PRIVATE cxx_std_23)
 target_include_directories(NifExportTests PRIVATE src)

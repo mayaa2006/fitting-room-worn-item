@@ -1,0 +1,251 @@
+#pragma once
+
+// Full read and write of the body-slider morph file (.tri, "PIRT") that
+// BodySlide writes beside a built mesh and RaceMenu reads through the mesh's
+// BODYTRI link (addon, "Make real armor").
+//
+// BodyMorphTri.h already reads the NAMES out of these files and skips the
+// vertex data by arithmetic; this reads the data too, because the export needs
+// it twice: to bake a piece's own morph values into its exported geometry, and
+// to write one combined tri for a merged item so the exported armor still
+// follows the wearer's body sliders.
+//
+//   char   magic[4]      "PIRT"
+//   u16    shapeCount
+//   per shape:
+//     u8   nameLen, char name[nameLen]
+//     u16  morphCount
+//     per morph:
+//       u8   nameLen, char name[nameLen]
+//       f32  multiplier
+//       u16  vertexCount
+//       vertexCount * (u16 index, i16 dx, i16 dy, i16 dz)
+//
+// A vertex moves by (dx, dy, dz) * multiplier * morph value, added to its
+// position in the shape's own space - what RaceMenu does at runtime.
+//
+// The raw integers are kept, not decoded floats, so a file that is only
+// re-arranged (shapes renamed and gathered into one file) is written back
+// bit for bit. Engine-free: tests/test_trifile.cpp.
+
+#include <array>
+#include <cctype>
+#include <cstdint>
+#include <map>
+#include <cstring>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace OS::TriFile {
+
+    struct Delta {
+        std::uint16_t index{ 0 };
+        std::int16_t  x{ 0 };
+        std::int16_t  y{ 0 };
+        std::int16_t  z{ 0 };
+    };
+
+    struct Morph {
+        std::string        name;
+        float              multiplier{ 0.0f };
+        std::vector<Delta> deltas;
+
+        [[nodiscard]] std::array<float, 3> Offset(const Delta& a_d) const {
+            return { a_d.x * multiplier, a_d.y * multiplier, a_d.z * multiplier };
+        }
+    };
+
+    struct Shape {
+        std::string        name;
+        std::vector<Morph> morphs;
+    };
+
+    using File = std::vector<Shape>;
+
+    namespace detail {
+        struct Reader {
+            std::string_view b;
+            std::size_t      at{ 0 };
+            bool             ok{ true };
+
+            bool Have(std::size_t a_n) const { return ok && a_n <= b.size() - at; }
+            std::uint8_t U8() {
+                if (!Have(1)) {
+                    ok = false;
+                    return 0;
+                }
+                return static_cast<std::uint8_t>(b[at++]);
+            }
+            std::uint16_t U16() {
+                if (!Have(2)) {
+                    ok = false;
+                    return 0;
+                }
+                const auto lo = static_cast<std::uint8_t>(b[at]);
+                const auto hi = static_cast<std::uint8_t>(b[at + 1]);
+                at += 2;
+                return static_cast<std::uint16_t>(lo | (hi << 8));
+            }
+            std::int16_t I16() { return static_cast<std::int16_t>(U16()); }
+            float F32() {
+                if (!Have(4)) {
+                    ok = false;
+                    return 0.0f;
+                }
+                std::uint32_t u = 0;
+                for (int i = 3; i >= 0; --i) {
+                    u = (u << 8) | static_cast<std::uint8_t>(b[at + static_cast<std::size_t>(i)]);
+                }
+                at += 4;
+                float f;
+                std::memcpy(&f, &u, 4);
+                return f;
+            }
+            std::string Str() {
+                const auto n = U8();
+                if (!Have(n)) {
+                    ok = false;
+                    return {};
+                }
+                std::string s{ b.substr(at, n) };
+                at += n;
+                return s;
+            }
+        };
+
+        inline void PutU8(std::vector<std::uint8_t>& o, std::uint8_t v) { o.push_back(v); }
+        inline void PutU16(std::vector<std::uint8_t>& o, std::uint16_t v) {
+            o.push_back(static_cast<std::uint8_t>(v & 0xFF));
+            o.push_back(static_cast<std::uint8_t>(v >> 8));
+        }
+        inline void PutF32(std::vector<std::uint8_t>& o, float f) {
+            std::uint32_t u;
+            std::memcpy(&u, &f, 4);
+            for (int i = 0; i < 4; ++i) {
+                o.push_back(static_cast<std::uint8_t>((u >> (8 * i)) & 0xFF));
+            }
+        }
+        inline void PutStr(std::vector<std::uint8_t>& o, std::string_view s) {
+            const auto n = s.size() > 255 ? std::size_t{ 255 } : s.size();
+            PutU8(o, static_cast<std::uint8_t>(n));
+            o.insert(o.end(), s.begin(), s.begin() + static_cast<std::ptrdiff_t>(n));
+        }
+    }
+
+    // Nothing for a file that is not a tri or is cut short: half a file would
+    // move some vertices and not others.
+    [[nodiscard]] inline std::optional<File> Parse(std::string_view a_bytes) {
+        if (a_bytes.size() < 6 || a_bytes.substr(0, 4) != "PIRT") {
+            return std::nullopt;
+        }
+        detail::Reader r{ a_bytes, 4, true };
+        File           out;
+        const auto     shapes = r.U16();
+        for (std::size_t s = 0; s < shapes && r.ok; ++s) {
+            Shape sh;
+            sh.name           = r.Str();
+            const auto morphs = r.U16();
+            for (std::size_t m = 0; m < morphs && r.ok; ++m) {
+                Morph mo;
+                mo.name          = r.Str();
+                mo.multiplier    = r.F32();
+                const auto count = r.U16();
+                // Every delta is 8 bytes: refuse a count the file cannot hold
+                // before reserving for it.
+                if (!r.Have(static_cast<std::size_t>(count) * 8u)) {
+                    return std::nullopt;
+                }
+                mo.deltas.resize(count);
+                for (auto& d : mo.deltas) {
+                    d.index = r.U16();
+                    d.x     = r.I16();
+                    d.y     = r.I16();
+                    d.z     = r.I16();
+                }
+                sh.morphs.push_back(std::move(mo));
+            }
+            out.push_back(std::move(sh));
+        }
+        if (!r.ok) {
+            return std::nullopt;
+        }
+        return out;
+    }
+
+    [[nodiscard]] inline std::optional<File> Parse(const std::vector<std::uint8_t>& a_bytes) {
+        return Parse(std::string_view(reinterpret_cast<const char*>(a_bytes.data()), a_bytes.size()));
+    }
+
+    // At most 65535 shapes, morphs per shape and deltas per morph are written
+    // (the wire fields are u16); a well-formed input never has more.
+    [[nodiscard]] inline std::vector<std::uint8_t> Serialize(const File& a_file) {
+        std::vector<std::uint8_t> o{ 'P', 'I', 'R', 'T' };
+        const auto clamp = [](std::size_t n) { return static_cast<std::uint16_t>(n > 0xFFFF ? 0xFFFF : n); };
+        const auto shapes = clamp(a_file.size());
+        detail::PutU16(o, shapes);
+        for (std::size_t s = 0; s < shapes; ++s) {
+            const auto& sh = a_file[s];
+            detail::PutStr(o, sh.name);
+            const auto morphs = clamp(sh.morphs.size());
+            detail::PutU16(o, morphs);
+            for (std::size_t m = 0; m < morphs; ++m) {
+                const auto& mo = sh.morphs[m];
+                detail::PutStr(o, mo.name);
+                detail::PutF32(o, mo.multiplier);
+                const auto count = clamp(mo.deltas.size());
+                detail::PutU16(o, count);
+                for (std::size_t i = 0; i < count; ++i) {
+                    const auto& d = mo.deltas[i];
+                    detail::PutU16(o, d.index);
+                    detail::PutU16(o, static_cast<std::uint16_t>(d.x));
+                    detail::PutU16(o, static_cast<std::uint16_t>(d.y));
+                    detail::PutU16(o, static_cast<std::uint16_t>(d.z));
+                }
+            }
+        }
+        return o;
+    }
+
+    // The shapes of a_file that a merge kept, under their merged names.
+    // a_names maps original shape names to merged ones; a tri names shapes the
+    // way the engine compares them, so an exact match wins and otherwise a
+    // case-blind one counts when it is unique. Shapes with no match are left
+    // out (their geometry is not in the merged file).
+    [[nodiscard]] inline File Renamed(const File& a_file, const std::map<std::string, std::string>& a_names) {
+        const auto lower = [](std::string x) {
+            for (auto& c : x) {
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            }
+            return x;
+        };
+        File out;
+        for (const auto& sh : a_file) {
+            const std::string* to = nullptr;
+            if (const auto it = a_names.find(sh.name); it != a_names.end()) {
+                to = &it->second;
+            } else {
+                const auto want = lower(sh.name);
+                int        hits = 0;
+                for (const auto& [from, merged] : a_names) {
+                    if (lower(from) == want) {
+                        to = &merged;
+                        ++hits;
+                    }
+                }
+                if (hits != 1) {
+                    to = nullptr;
+                }
+            }
+            if (!to) {
+                continue;
+            }
+            auto copy = sh;
+            copy.name = *to;
+            out.push_back(std::move(copy));
+        }
+        return out;
+    }
+
+}  // namespace OS::TriFile

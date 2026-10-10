@@ -1,9 +1,11 @@
 #include "ArmorExport.h"
 
+#include "BodyMorphTri.h"
 #include "EspWriter.h"
 #include "NifExport.h"
 #include "RendererData.h"
 #include "StyleRef.h"
+#include "TriFile.h"
 
 #include <DirectXTex.h>
 #include <d3d11.h>
@@ -18,6 +20,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <thread>
 
@@ -76,6 +79,8 @@ namespace OS::ArmorExport {
             std::string                     model3rd;  // record-relative
             std::string                     model1st;  // record-relative, may be empty
             std::vector<NifExport::ShapeEdit> edits;
+            std::string                     pieceName;  // for notes
+            std::map<std::string, float>    morphs;     // baked into this piece's 3rd-person mesh
             EspWriter::FormRef              race;
             std::vector<EspWriter::FormRef> additionalRaces;
             std::uint32_t                   slots{ 0 };
@@ -219,8 +224,15 @@ namespace OS::ArmorExport {
         // Records one piece's displayed ARMA: model paths, and per shape the
         // dyed textures to bake and the slots they replace.
         void GatherAddon(Job& a_job, Item& a_item, RE::TESObjectARMA* a_arma, const RE::BIPOBJECT& a_obj,
-                         RE::SEX a_sex) {
+                         RE::SEX a_sex, const std::string& a_pieceName,
+                         const std::map<std::string, float>& a_morphs) {
             Addon ad;
+            ad.pieceName = a_pieceName;
+            for (const auto& [name, value] : a_morphs) {
+                if (value != 0.0f) {
+                    ad.morphs.emplace(name, value);
+                }
+            }
             const auto other = a_sex == RE::SEX::kFemale ? RE::SEX::kMale : RE::SEX::kFemale;
             ad.model3rd = a_obj.part ? ModelOf(*a_obj.part) : std::string{};
             if (ad.model3rd.empty()) {
@@ -423,7 +435,10 @@ namespace OS::ArmorExport {
                 item.bucket   = plan.bucket;
                 item.settings = settings;
                 RE::TESObjectARMO* mainArmo = nullptr;
-                for (const auto& key : plan.styles) {
+                for (std::size_t si = 0; si < plan.styles.size(); ++si) {
+                    const auto& key = plan.styles[si];
+                    static const std::map<std::string, float> kNoMorphs;
+                    const auto& morphs = si < settings.morphs.size() ? settings.morphs[si] : kNoMorphs;
                     auto* armo = StyleRef::Resolve(key);
                     if (!armo) {
                         job->notes.push_back("a piece from " + key.modName + " is not in your load order");
@@ -444,7 +459,8 @@ namespace OS::ArmorExport {
                             continue;
                         }
                         done.insert(obj.addon);
-                        GatherAddon(*job, item, obj.addon, obj, sex);
+                        const char* pn = armo->GetName();
+                        GatherAddon(*job, item, obj.addon, obj, sex, (pn && *pn) ? pn : "a piece", morphs);
                         any = true;
                     }
                     if (!any) {
@@ -593,13 +609,40 @@ namespace OS::ArmorExport {
             return true;
         }
 
+        // A tri file named by a mesh (BODYTRI is meshes-relative), parsed.
+        std::optional<TriFile::File> ReadTri(const std::string& a_meshesRel) {
+            if (a_meshesRel.empty()) {
+                return std::nullopt;
+            }
+            const auto bytes = ArchiveBytes(M::ArchiveMeshPath(M::RecordModelPath(a_meshesRel)));
+            if (bytes.empty()) {
+                return std::nullopt;
+            }
+            return TriFile::Parse(bytes);
+        }
+
         // One NIF for an item: every addon's model rewritten, then merged.
         // a_variant is "_0", "_1" or "" (single file); a_firstPerson picks the
         // first-person models instead. Returns false with a_err on failure, or
         // true with empty a_out when no addon has such a model.
+        //
+        // Third person also bakes each piece's own morph values into it, and
+        // when any piece follows body sliders, gathers the pieces' tri data
+        // under their merged shape names into a_triOut and links the merged
+        // mesh to a_triRel - one tri per item, so the merged armor still
+        // follows the wearer's body sliders.
         bool BuildNif(const Item& a_item, const std::string& a_variant, bool a_firstPerson,
-                      std::vector<std::uint8_t>& a_out, std::vector<std::string>& a_notes, std::string& a_err) {
+                      const std::string& a_triRel, std::vector<std::uint8_t>& a_out,
+                      std::vector<std::uint8_t>& a_triOut, std::vector<std::string>& a_notes, std::string& a_err) {
+            a_triOut.clear();
+            // Notes once per item, not once per weight variant.
+            const bool report = !a_firstPerson && a_variant != "_0";
             std::vector<std::vector<std::uint8_t>> parts;
+            struct PartTri {
+                bool                         linked{ false };  // the mesh named a tri
+                std::optional<TriFile::File> tri;              // ... and it was readable
+            };
+            std::vector<PartTri> partTris;
             for (const auto& ad : a_item.addons) {
                 const auto& model = a_firstPerson ? ad.model1st : ad.model3rd;
                 if (model.empty()) {
@@ -635,7 +678,43 @@ namespace OS::ArmorExport {
                 if (r.unmatched > 0) {
                     spdlog::warn("ArmorExport: {} shape edit(s) found no shape in {}.", r.unmatched, path);
                 }
+                PartTri pt;
+                if (!a_firstPerson) {
+                    const auto linkPath = NifExport::BodyTriPath(r.bytes);
+                    pt.linked           = !linkPath.empty();
+                    pt.tri              = ReadTri(linkPath);
+                    // The menu listed the morphs of the tri BodySlide wrote
+                    // beside the mesh; use that one when the mesh names none.
+                    auto bakeTri = pt.tri;
+                    if (!bakeTri && !pt.linked) {
+                        bakeTri = ReadTri(BodyMorphTri::TriPathFor(M::RecordModelPath(model)));
+                    }
+                    if (!ad.morphs.empty()) {
+                        if (!bakeTri) {
+                            if (report) {
+                                a_notes.push_back("\"" + ad.pieceName +
+                                                  "\" has no body-slider data, so its morph changes were not applied");
+                            }
+                        } else {
+                            auto m = NifExport::ApplyMorphs(r.bytes, *bakeTri, ad.morphs);
+                            if (!m.ok) {
+                                if (report) {
+                                    a_notes.push_back("\"" + ad.pieceName + "\" morphs: " + m.error);
+                                }
+                            } else {
+                                if (m.edited == 0 && report) {
+                                    a_notes.push_back("the morph changes on \"" + ad.pieceName +
+                                                      "\" did not move any of its shapes");
+                                }
+                                spdlog::info("ArmorExport: baked {} morph value(s) into {} shape(s) of {}.",
+                                             ad.morphs.size(), m.edited, path);
+                                r.bytes = std::move(m.bytes);
+                            }
+                        }
+                    }
+                }
                 parts.push_back(std::move(r.bytes));
+                partTris.push_back(std::move(pt));
             }
             if (parts.empty()) {
                 a_out.clear();
@@ -646,11 +725,41 @@ namespace OS::ArmorExport {
                 a_err = std::string(M::BucketLabel(a_item.bucket)) + " merge: " + merged.error;
                 return false;
             }
-            if (merged.droppedExtra > 0 && !a_firstPerson && a_variant != "_0") {
-                a_notes.push_back(std::to_string(merged.droppedExtra) + " piece(s) merged into the " +
+            if (merged.droppedPhysics > 0 && report) {
+                a_notes.push_back(std::to_string(merged.droppedPhysics) + " piece(s) merged into the " +
                                   M::BucketLabel(a_item.bucket) +
-                                  " had body-slider or physics data that one merged mesh cannot keep; "
-                                  "they will not follow body sliders");
+                                  " had physics that one merged mesh cannot keep; they will not move with physics");
+            }
+
+            if (!a_firstPerson && !a_triRel.empty()) {
+                TriFile::File combined;
+                int           lost = 0;
+                for (std::size_t i = 0; i < partTris.size() && i < merged.names.size(); ++i) {
+                    const auto& pt = partTris[i];
+                    if (!pt.linked) {
+                        continue;
+                    }
+                    if (!pt.tri) {
+                        ++lost;
+                        continue;
+                    }
+                    for (auto& ts : TriFile::Renamed(*pt.tri, merged.names[i])) {
+                        combined.push_back(std::move(ts));
+                    }
+                }
+                if (!combined.empty()) {
+                    auto linked = NifExport::SetBodyTri(merged.bytes, a_triRel);
+                    if (!linked.ok) {
+                        a_err = std::string(M::BucketLabel(a_item.bucket)) + " body sliders: " + linked.error;
+                        return false;
+                    }
+                    merged.bytes = std::move(linked.bytes);
+                    a_triOut     = TriFile::Serialize(combined);
+                }
+                if (lost > 0 && report) {
+                    a_notes.push_back(std::to_string(lost) + " piece(s) in the " + M::BucketLabel(a_item.bucket) +
+                                      " link body-slider data that could not be read; they will not follow body sliders");
+                }
             }
             a_out = std::move(merged.bytes);
             return true;
@@ -807,9 +916,12 @@ namespace OS::ArmorExport {
                     std::string modelPath;
                     std::string err;
                     std::size_t wroteVariants = 0;
+                    const auto  triRel        = meshRel + label + ".tri";
+                    std::vector<std::uint8_t> triBytes;
                     for (const auto& v : variants) {
                         std::vector<std::uint8_t> bytes;
-                        if (!BuildNif(item, v, false, bytes, job.notes, err)) {
+                        std::vector<std::uint8_t> tri;
+                        if (!BuildNif(item, v, false, triRel, bytes, tri, job.notes, err)) {
                             Fail(job, err);
                             return;
                         }
@@ -826,7 +938,15 @@ namespace OS::ArmorExport {
                             Fail(job, err);
                             return;
                         }
+                        if (!tri.empty()) {
+                            triBytes = std::move(tri);  // the weights share one tri, as BodySlide's do
+                        }
                         ++wroteVariants;
+                    }
+                    if (!triBytes.empty() &&
+                        !WriteFile(fs::path("Data\\meshes\\" + triRel), triBytes, err)) {
+                        Fail(job, err);
+                        return;
                     }
                     if (wroteVariants == variants.size()) {
                         modelPath = meshRel + label + (anyPair ? "_1" : "") + ".nif";
@@ -842,7 +962,8 @@ namespace OS::ArmorExport {
                         std::size_t wrote1st = 0;
                         for (const auto& v : variants) {
                             std::vector<std::uint8_t> bytes;
-                            if (!BuildNif(item, v, true, bytes, job.notes, err)) {
+                            std::vector<std::uint8_t> noTri;
+                            if (!BuildNif(item, v, true, {}, bytes, noTri, job.notes, err)) {
                                 Fail(job, err);
                                 return;
                             }
@@ -1030,6 +1151,11 @@ namespace OS::ArmorExport {
         std::array<ItemPlan, M::kBucketCount>         items{};
         std::array<bool, M::kBucketCount>             typed{};
         std::vector<StyleRefKey>                      seen;
+        auto*      player   = RE::PlayerCharacter::GetSingleton();
+        auto*      base     = player ? player->GetActorBase() : nullptr;
+        const auto sex      = base && base->GetSex() == RE::SEX::kFemale ? RE::SEX::kFemale : RE::SEX::kMale;
+        const auto otherSex = sex == RE::SEX::kFemale ? RE::SEX::kMale : RE::SEX::kFemale;
+        auto*      race     = player ? player->GetRace() : nullptr;
         a_outfit.ForEachStyle([&](std::uint32_t, const StyleRefKey& a_key) {
             for (const auto& s : seen) {
                 if (s == a_key) {
@@ -1054,6 +1180,30 @@ namespace OS::ArmorExport {
             it.bucket = b;
             it.styles.push_back(a_key);
             it.pieceNames.push_back(label);
+            {
+                // Where BodySlide put each model's morphs, for the menu's list.
+                // Only the armatures that fit your race, when any do: a
+                // beast-race mesh's morphs are not on what you wear.
+                bool anyFits = false;
+                for (auto* aa : armo->armorAddons) {
+                    anyFits = anyFits || (aa && race && aa->IsValidRace(race));
+                }
+                std::vector<std::string> tris;
+                for (auto* aa : armo->armorAddons) {
+                    if (!aa || (anyFits && !aa->IsValidRace(race))) {
+                        continue;
+                    }
+                    std::string model = ModelOf(aa->bipedModels[sex]);
+                    if (model.empty()) {
+                        model = ModelOf(aa->bipedModels[otherSex]);
+                    }
+                    auto tri = BodyMorphTri::TriPathFor(M::RecordModelPath(model));
+                    if (!tri.empty() && std::find(tris.begin(), tris.end(), tri) == tris.end()) {
+                        tris.push_back(std::move(tri));
+                    }
+                }
+                it.triPaths.push_back(std::move(tris));
+            }
             it.slots |= slots;
             it.defaults.rating += static_cast<float>(armo->armorRating) / 100.0f;
             it.defaults.weight += armo->weight;
@@ -1082,6 +1232,30 @@ namespace OS::ArmorExport {
             plan.items.push_back(std::move(it));
         }
         return plan;
+    }
+
+    std::vector<std::string> MorphNames(const std::vector<std::string>& a_triPaths) {
+        std::set<std::string> names;
+        for (const auto& rel : a_triPaths) {
+            std::error_code ec;
+            const auto      path = fs::path("Data") / "meshes" / rel;
+            if (!fs::is_regular_file(path, ec) || ec) {
+                continue;
+            }
+            const auto size = fs::file_size(path, ec);
+            if (ec || size == 0 || size > 256ull * 1024ull * 1024ull) {
+                continue;
+            }
+            std::ifstream in(path, std::ios::binary);
+            std::string   text(static_cast<std::size_t>(size), '\0');
+            if (!in.read(text.data(), static_cast<std::streamsize>(size))) {
+                continue;
+            }
+            for (auto& n : BodyMorphTri::ParseNames(text)) {
+                names.insert(std::move(n));
+            }
+        }
+        return { names.begin(), names.end() };
     }
 
     bool Start(Request a_request) {

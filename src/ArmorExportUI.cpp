@@ -4,6 +4,9 @@
 #include "ChamferPanel.h"
 #include "FuckCompat.h"
 
+#include <cctype>
+#include <chrono>
+#include <future>
 #include <string>
 #include <vector>
 
@@ -20,15 +23,131 @@ namespace OS::ArmorExportUI {
         std::string                         g_pluginName;
         bool                                g_recipe = true;
 
+        // Per item, per piece: the morph names its tri files carry. Read off
+        // the draw thread (a body-slider tri is megabytes), once per opening.
+        using MorphNameTable = std::vector<std::vector<std::vector<std::string>>>;
+        std::future<MorphNameTable> g_namesJob;
+        MorphNameTable              g_names;
+        bool                        g_namesReady = false;
+        // Per item, per piece: the morph list's filter text.
+        std::vector<std::vector<std::string>> g_filters;
+
+        void PollNames() {
+            if (g_namesReady || !g_namesJob.valid()) {
+                return;
+            }
+            if (g_namesJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                g_names      = g_namesJob.get();
+                g_namesReady = true;
+            }
+        }
+
+        bool Contains(const std::string& a_hay, const std::string& a_needle) {
+            if (a_needle.empty()) {
+                return true;
+            }
+            const auto lower = [](std::string x) {
+                for (auto& c : x) {
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                }
+                return x;
+            };
+            return lower(a_hay).find(lower(a_needle)) != std::string::npos;
+        }
+
+        // One piece's morph list. a_values is that piece's name -> value map.
+        void DrawPieceMorphs(std::size_t a_item, std::size_t a_piece, const std::string& a_pieceName,
+                             std::map<std::string, float>& a_values, float a_em) {
+            std::size_t changed = 0;
+            for (const auto& [n, v] : a_values) {
+                changed += v != 0.0f ? 1 : 0;
+            }
+            std::string label = "Body morphs: " + a_pieceName;
+            if (changed > 0) {
+                label += " (" + std::to_string(changed) + " changed)";
+            }
+            label += "###morphs";
+            if (!FUCK::TreeNode(label.c_str())) {
+                return;
+            }
+            const std::vector<std::string>* names = nullptr;
+            if (g_namesReady && a_item < g_names.size() && a_piece < g_names[a_item].size()) {
+                names = &g_names[a_item][a_piece];
+            }
+            if (!g_namesReady) {
+                FUCK::TextDisabled("%s", "Reading the piece's body-slider data...");
+            } else if (!names || names->empty()) {
+                FUCK::PushTextWrapPos(a_em * 34.0f);
+                FUCK::TextWrapped("%s",
+                                  "This piece has no body-slider data (it was not built in BodySlide with "
+                                  "morphs), so its shape cannot be changed here.");
+                FUCK::PopTextWrapPos();
+            } else {
+                FUCK::PushTextWrapPos(a_em * 34.0f);
+                FUCK::TextDisabled("%s",
+                                   "Changes this piece only, on top of your body. The armor still follows "
+                                   "your body sliders after this.");
+                FUCK::PopTextWrapPos();
+                auto& filter = g_filters[a_item][a_piece];
+                FUCK::SetNextItemWidth(a_em * 12.0f);
+                FUCK::InputText("Find", &filter);
+                FUCK::SameLine();
+                FUCK::BeginDisabled(changed == 0);
+                if (FUCK::Button("Reset")) {
+                    a_values.clear();
+                }
+                FUCK::EndDisabled();
+                FUCK::BeginChild("morph_rows", ImVec2(0, a_em * 12.0f), true);
+                for (const auto& n : *names) {
+                    if (!Contains(n, filter)) {
+                        continue;
+                    }
+                    const auto it  = a_values.find(n);
+                    float      pct = it == a_values.end() ? 0.0f : it->second * 100.0f;
+                    FUCK::SetNextItemWidth(a_em * 10.0f);
+                    if (FUCK::DragFloat(n.c_str(), &pct, 1.0f, -200.0f, 200.0f, "%.0f%%")) {
+                        if (pct == 0.0f) {
+                            a_values.erase(n);
+                        } else {
+                            a_values[n] = pct / 100.0f;
+                        }
+                    }
+                    if (FUCK::IsItemHovered()) {
+                        FUCK::SetTooltip("Drag to change. Zero leaves the piece as it was built.");
+                    }
+                }
+                FUCK::EndChild();
+            }
+            FUCK::TreePop();
+        }
+
         int TypeIndex(M::ArmorType a_t) { return static_cast<int>(a_t); }
     }
 
     void Open(const Outfit& a_outfit) {
         g_plan = ArmorExport::PlanFor(a_outfit, a_outfit.name);
         g_settings.clear();
+        g_filters.clear();
+        std::vector<std::vector<std::vector<std::string>>> triPaths;
         for (const auto& it : g_plan.items) {
             g_settings.push_back(it.defaults);
+            g_settings.back().morphs.assign(it.styles.size(), {});
+            g_filters.emplace_back(it.styles.size());
+            triPaths.push_back(it.triPaths);
+            triPaths.back().resize(it.styles.size());
         }
+        g_names.clear();
+        g_namesReady = false;
+        g_namesJob   = std::async(std::launch::async, [paths = std::move(triPaths)] {
+            MorphNameTable out;
+            for (const auto& item : paths) {
+                auto& row = out.emplace_back();
+                for (const auto& piece : item) {
+                    row.push_back(ArmorExport::MorphNames(piece));
+                }
+            }
+            return out;
+        });
         // An outfit name in a non-Latin script sanitizes to nothing; fall back
         // to a name that is still unique per outfit.
         auto readable = M::SafeName(a_outfit.name, 32, "");
@@ -53,6 +172,7 @@ namespace OS::ArmorExportUI {
         }
         const float em     = OS::ui::FontSize();
         const auto  status = ArmorExport::GetStatus();
+        PollNames();
 
         FUCK::TextUnformatted("Make real armor");
         FUCK::TextDisabled("%s", "Turns the outfit on your character into real items you can equip.");
@@ -100,6 +220,11 @@ namespace OS::ArmorExportUI {
                 FUCK::DragFloat("Weight", &s.weight, 0.1f, 0.0f, 200.0f, "%.1f");
                 FUCK::SetNextItemWidth(em * 8.0f);
                 FUCK::DragInt("Value", &s.value, 1.0f, 0, 1000000);
+                for (std::size_t p = 0; p < plan.pieceNames.size() && p < s.morphs.size(); ++p) {
+                    FUCK::PushID(static_cast<int>(1000 + p));
+                    DrawPieceMorphs(i, p, plan.pieceNames[p], s.morphs[p], em);
+                    FUCK::PopID();
+                }
             }
             FUCK::PopID();
         }

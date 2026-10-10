@@ -18,6 +18,7 @@
 
 #include <array>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -35,6 +36,10 @@ namespace OS::ArmorExport {
         float       rating{ 0.0f };
         float       weight{ 0.0f };
         int         value{ 0 };
+        // Per piece, parallel to ItemPlan::styles: body-slider morph name ->
+        // value (1 = 100%), baked into that piece's geometry only. Absent or
+        // zero leaves the piece as it was built.
+        std::vector<std::map<std::string, float>> morphs;
     };
 
     // One item: a bucket and the styled pieces that go into it.
@@ -43,6 +48,9 @@ namespace OS::ArmorExport {
         std::vector<StyleRefKey> styles;
         std::vector<std::string> pieceNames;  // for the menu
         std::uint32_t            slots{ 0 };  // union of the pieces' slot masks
+        // Per piece, parallel to styles: the meshes-relative .tri files
+        // BodySlide wrote beside its models, for listing its morphs.
+        std::vector<std::vector<std::string>> triPaths;
         ItemSettings             defaults;
     };
 
@@ -61,6 +69,11 @@ namespace OS::ArmorExport {
         std::vector<std::pair<ItemPlan, ItemSettings>> items;
         bool                                            recipe{ true };
     };
+
+    // The body-slider morph names in those tri files (loose files only, as
+    // BodySlide writes them), sorted and de-duplicated. Plain file reads, so
+    // any thread; the menu calls it off the draw thread.
+    [[nodiscard]] std::vector<std::string> MorphNames(const std::vector<std::string>& a_triPaths);
 
     // False when an export is already running.
     bool Start(Request a_request);
