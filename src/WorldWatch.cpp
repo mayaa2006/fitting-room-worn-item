@@ -4,6 +4,7 @@
 #include "CrashGuard.h"
 #include "OutfitSession.h"
 #include "PieceMorphs.h"  // addon: live per-piece body morphs
+#include "LayerCopies.h"  // addon: layer copies
 #include "MakeupApi.h"         // ReassertSkinTone: the held tone, between head builds
 #include "OverlayApi.h"        // RunNodePropertyPush: the layers a skin repaint took
 #include "OverlayReconcile.h"  // OS-233: Tick, the repair's armed check
@@ -1463,6 +1464,8 @@ namespace OS::WorldWatch {
             // Live per-piece morphs (addon): relink newly attached pieces and
             // keep their values on. Throttled inside; free with no settings.
             PieceMorphs::Tick(player);
+            // Layer copies (addon): unlock copies of looks you own. Every 2 s.
+            LayerCopies::Tick();
             if (!player || !player->Get3D()) {
                 // Same gate Evaluate uses. Forget the baseline too, so the first
                 // sample after a load is treated as a baseline rather than as a

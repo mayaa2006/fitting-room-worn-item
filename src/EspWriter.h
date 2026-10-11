@@ -56,6 +56,7 @@ namespace OS::EspWriter {
         float                weaponAdjust{ 0.0f };
         std::string          model[2];        // male, female (relative to meshes\)
         std::string          model1st[2];     // male, female first person
+        FormRef              footstep;        // SNDD, optional
     };
 
     struct Armo {
@@ -286,6 +287,9 @@ namespace OS::EspWriter {
             for (const auto& r : a.additionalRaces) {
                 masters.Note(r);
             }
+            if (!a.footstep.Empty()) {
+                masters.Note(a.footstep);
+            }
         }
         for (const auto& a : a_spec.armos) {
             masters.Note(a.race);
@@ -457,6 +461,9 @@ namespace OS::EspWriter {
                 }
                 for (const auto& race : a.additionalRaces) {
                     FormIdSub(o, "MODL", masters.FormID(race));
+                }
+                if (!a.footstep.Empty()) {
+                    FormIdSub(o, "SNDD", masters.FormID(a.footstep));
                 }
             }
         }

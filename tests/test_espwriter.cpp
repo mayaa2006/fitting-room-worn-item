@@ -287,6 +287,39 @@ int main() {
         CHECK(U32(r.Find("MODL", 1)->data, 0) == ((1u << 24) | 0x283A));
     }
 
+    {  // An addon with a footstep set writes SNDD after its races.
+        PluginSpec fs;
+        fs.masterOrder = { "Skyrim.esm" };
+        Arma a;
+        a.id       = 0x800;
+        a.edid     = "Layer";
+        a.race     = FormRef{ "Skyrim.esm", 0x19 };
+        a.additionalRaces = { FormRef{ "Skyrim.esm", 0x13746 } };
+        a.footstep = FormRef{ "Skyrim.esm", 0x0BFA2A };
+        fs.armas.push_back(a);
+        const auto b = Serialize(fs);
+        std::size_t p = 0;
+        Rec         h;
+        CHECK(ReadRecord(b, p, h));
+        std::vector<Rec> rs;
+        // One group header (24 bytes), then its records.
+        CHECK(p + 24 <= b.size() && Tag(b, p) == "GRUP");
+        p += 24;
+        while (p < b.size()) {
+            Rec r;
+            if (!ReadRecord(b, p, r)) {
+                break;
+            }
+            rs.push_back(std::move(r));
+        }
+        CHECK(rs.size() == 1);
+        if (rs.size() == 1) {
+            const std::vector<std::string> order = { "EDID", "BOD2", "RNAM", "DNAM", "MODL", "SNDD" };
+            CHECK(rs[0].Tags() == order);
+            CHECK(rs[0].Find("SNDD") && U32(rs[0].Find("SNDD")->data, 0) == 0x000BFA2A);
+        }
+    }
+
     {  // A plugin with no masters at all still numbers its own records index 0,
        // and an ESP without the light flag says so.
         PluginSpec bare;

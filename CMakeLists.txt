@@ -472,6 +472,11 @@ add_commonlibsse_plugin(${PROJECT_NAME}
         src/PieceMorphs.cpp
         src/PieceMorphUI.h
         src/PieceMorphUI.cpp
+        src/LayerCopyModel.h
+        src/LayerCopies.h
+        src/LayerCopies.cpp
+        src/LayerCopyUI.h
+        src/LayerCopyUI.cpp
         src/RuleEngine.h
         src/RuleEngine.cpp
         src/RuleCodec.h
@@ -1238,6 +1243,11 @@ target_include_directories(ArmorExportModelTests PRIVATE src)
 add_executable(TriFileTests tests/test_trifile.cpp)
 target_compile_features(TriFileTests PRIVATE cxx_std_23)
 target_include_directories(TriFileTests PRIVATE src)
+
+add_executable(LayerCopyModelTests tests/test_layercopymodel.cpp)
+target_compile_features(LayerCopyModelTests PRIVATE cxx_std_23)
+target_include_directories(LayerCopyModelTests PRIVATE src)
+target_link_libraries(LayerCopyModelTests PRIVATE JsonCpp::JsonCpp)
 
 add_executable(PieceMorphModelTests tests/test_piecemorphmodel.cpp)
 target_compile_features(PieceMorphModelTests PRIVATE cxx_std_23)
