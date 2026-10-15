@@ -25,6 +25,8 @@ namespace OS::NifExport {
         // Texture-set slot (0-8) -> path to write. Paths are written as given,
         // so pass NIF form ("textures\...").
         std::map<std::uint32_t, std::string> textures;
+        // Leave this shape out of the file (a part hidden in the outfit).
+        bool  remove{ false };
         bool  hasSpecular{ false };
         float specular[3]{ 1.0f, 1.0f, 1.0f };
         float glossiness{ 0.0f };
@@ -38,6 +40,7 @@ namespace OS::NifExport {
         int                       edited{ 0 };     // shapes an edit landed on
         int                       remapped{ 0 };   // texture slots changed by a_remap
         int                       unmatched{ 0 };  // edits that found no shape
+        int                       removed{ 0 };    // shapes left out (ShapeEdit::remove)
         int                       droppedTri{ 0 };      // Merge: non-base files with a BODYTRI link
         int                       droppedPhysics{ 0 };  // Merge: non-base files with HDT/SMP physics
         // Merge: per input file, each shape's original name -> its name in

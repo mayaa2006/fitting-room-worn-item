@@ -134,6 +134,10 @@ namespace OS::OutfitDye {
         // destructor at detach touches no engine state.
         auto&                                                  g_swapped =
             *new std::unordered_map<RE::FormID, std::vector<Swapped>>();
+        // Hidden parts (addon): geometries this walk set kHidden on, per actor,
+        // so Restore shows exactly those again and never one something else
+        // hid. Leaked for g_swapped's reason (it holds engine geometry).
+        auto& g_hidden = *new std::unordered_map<RE::FormID, std::vector<RE::NiPointer<RE::BSGeometry>>>();
         std::unordered_map<RE::FormID, std::vector<ShapeInfo>>  g_shapes;
 
         // See ArmPassDump in the header.
@@ -2786,6 +2790,7 @@ namespace OS::OutfitDye {
         const auto dyePreview = DyePreviewFor(a_actor);
 
         std::vector<Swapped>   record;
+        std::vector<RE::NiPointer<RE::BSGeometry>> hiddenRecord;  // addon: hidden parts
         std::vector<ShapeInfo> shapes;
         // ⚠ ONE ARMOUR ADDON COVERING TWO SLOTS GIVES BOTH BITS THE SAME
         // partClone, so the per-bit walk reaches the same BSGeometry twice.
@@ -3130,6 +3135,17 @@ namespace OS::OutfitDye {
                     const bool dyeable = !blood && IsDyeableFeature(feature);
                     const auto index   = shapeIndex++;
                     ++seen;
+                    // Hidden parts (addon). Keyed exactly like the colour: the
+                    // shape's channel by position, on armour only. Done before
+                    // every paint filter, because a part is hidden whether or
+                    // not it could be dyed.
+                    if (a_key.target == DyeTarget::kArmour &&
+                        a_dye.channels[static_cast<std::size_t>(ChannelForShapeIndex(index))].hidden) {
+                        if (!a_geom->GetFlags().any(RE::NiAVObject::Flag::kHidden)) {
+                            a_geom->GetFlags().set(RE::NiAVObject::Flag::kHidden);
+                            hiddenRecord.emplace_back(a_geom);
+                        }
+                    }
                     // Before the dyeable filter and before the channel check,
                     // deliberately: the census has to describe every shape the
                     // walk reaches, including the ones the dye path refuses,
@@ -4139,6 +4155,12 @@ namespace OS::OutfitDye {
             } else {
                 g_swapped[id] = std::move(record);
             }
+            if (hiddenRecord.empty()) {
+                g_hidden.erase(id);
+            } else {
+                spdlog::debug("OutfitDye: actor {:08X} hides {} part(s).", id, hiddenRecord.size());
+                g_hidden[id] = std::move(hiddenRecord);
+            }
         }
 
         if (emissiveProbe) {
@@ -4902,6 +4924,23 @@ namespace OS::OutfitDye {
         // actor" would need the flash to be keyed per actor, and it is not -
         // there is one lit stripe at a time, on whoever the editor is dressing.
         EndFlash();
+        // Hidden parts (addon): show what this walk hid. A geometry the refresh
+        // has already unhooked is shown too, harmlessly; the reference is ours.
+        {
+            std::vector<RE::NiPointer<RE::BSGeometry>> shown;
+            {
+                std::scoped_lock l(g_lock);
+                if (const auto it = g_hidden.find(a_actor->GetFormID()); it != g_hidden.end()) {
+                    shown = std::move(it->second);
+                    g_hidden.erase(it);
+                }
+            }
+            for (auto& g : shown) {
+                if (g) {
+                    g->GetFlags().reset(RE::NiAVObject::Flag::kHidden);
+                }
+            }
+        }
         std::vector<Swapped> mine;
         {
             std::scoped_lock l(g_lock);
@@ -4982,6 +5021,16 @@ namespace OS::OutfitDye {
             // between this and the process-exit teardown g_swapped's leak
             // exists to avoid.
             g_swapped.clear();
+            // Hidden parts (addon): shown again and released here, on the
+            // game thread, for the same reason.
+            for (auto& [hid, geoms] : g_hidden) {
+                for (auto& g : geoms) {
+                    if (g) {
+                        g->GetFlags().reset(RE::NiAVObject::Flag::kHidden);
+                    }
+                }
+            }
+            g_hidden.clear();
             // The snapshot goes with them. It describes the shapes the previous
             // character was wearing, and the editor would otherwise label the
             // next character's channels from it until the first refresh landed.

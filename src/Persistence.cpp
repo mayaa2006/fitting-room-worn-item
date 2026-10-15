@@ -14,6 +14,7 @@
 #include "HeadPart.h"  // 'HPBS': this save's captured pre-Fitting-Room parts
 #include "NpcHair.h"
 #include "JsonCodec.h"
+#include "HiddenPartsCodec.h"  // addon: 'FHID'
 #include "MeasuredGhosts.h"  // measured ghost bits die with the save
 #include "NpcAssignments.h"
 #include "ObodyApi.h"
@@ -120,6 +121,10 @@ namespace OS::Persistence {
         // Its own record type so an unmodified build skips it: the load loop
         // below drops any type it does not name before reading a byte.
         constexpr std::uint32_t kRecordFollowerMirror = 'FMIR';
+        // Hidden parts (addon): which outfit parts are hidden, laid back over
+        // the library after 'LIBR' and 'NPCO' load so 'LIBR' itself keeps the
+        // upstream format. JSON in a blob, written last. See HiddenPartsCodec.h.
+        constexpr std::uint32_t kRecordHiddenParts = 'FHID';
         // This save's CHARACTER DEFAULTS: the hair, eyes and brows a character
         // falls back to, and the body they do.
         //
@@ -179,6 +184,7 @@ namespace OS::Persistence {
         constexpr std::uint32_t kHeadBaseVersion   = 1;
         constexpr std::uint32_t kRuleVersion = 1;
         constexpr std::uint32_t kFollowerMirrorVersion = 1;
+        constexpr std::uint32_t kHiddenPartsVersion = 1;
         constexpr std::uint32_t kOvlBaseVersion = 1;
         constexpr std::uint32_t kMkBaseVersion  = 1;
         constexpr std::uint32_t kSkinHoldVersion = 1;
@@ -765,6 +771,34 @@ namespace OS::Persistence {
             } catch (...) {
                 spdlog::error("Persistence: building the follower mirror record threw; not saved.");
             }
+
+            // Hidden parts (addon). Last, so on load the libraries it lays
+            // over are already in place. Only when something is hidden.
+            try {
+                Json::Value root(Json::objectValue);
+                root["player"] = HiddenPartsCodec::EncodeLibrary(lib);
+                Json::Value npcs(Json::arrayValue);
+                for (const auto& [key, rec] : OutfitSession::GetSingleton().SnapshotNpcAssignments()) {
+                    auto list = HiddenPartsCodec::EncodeLibrary(rec.library);
+                    if (list.empty()) {
+                        continue;
+                    }
+                    Json::Value n(Json::objectValue);
+                    n["m"]  = key.modName;
+                    n["f"]  = key.localFormID;
+                    n["o"]  = std::move(list);
+                    npcs.append(std::move(n));
+                }
+                if (!root["player"].empty() || !npcs.empty()) {
+                    root["npc"] = std::move(npcs);
+                    Json::StreamWriterBuilder wb;
+                    wb["indentation"] = "";
+                    WriteRecord(a_intf, kRecordHiddenParts, kHiddenPartsVersion,
+                                EncodeOverlayBaseline(Json::writeString(wb, root)), "hidden parts");
+                }
+            } catch (...) {
+                spdlog::error("Persistence: building the hidden parts record threw; not saved.");
+            }
         }
 
         void LoadCallback(SKSE::SerializationInterface* a_intf) {
@@ -824,7 +858,7 @@ namespace OS::Persistence {
                     type != kRecordDyeAck && type != kRecordSkin &&
                     type != kRecordOvlBase && type != kRecordMkBase &&
                     type != kRecordSkinHold && type != kRecordSex &&
-                    type != kRecordFollowerMirror) {
+                    type != kRecordFollowerMirror && type != kRecordHiddenParts) {
                     continue;
                 }
                 std::uint32_t len = 0;
@@ -1296,6 +1330,51 @@ namespace OS::Persistence {
                         const std::string name(reinterpret_cast<const char*>(bytes.data()),
                                                bytes.size());
                         OutfitSession::GetSingleton().ActivateByName(name);
+                    }
+                    continue;
+                }
+                if (type == kRecordHiddenParts) {
+                    std::string json;
+                    if (version != kHiddenPartsVersion || !DecodeOverlayBaseline(bytes, json)) {
+                        spdlog::warn("Persistence: refused hidden parts record (version {}).", version);
+                        continue;
+                    }
+                    try {
+                        Json::Value             root;
+                        Json::CharReaderBuilder rb;
+                        std::string             errs;
+                        std::istringstream      in(json);
+                        if (!Json::parseFromStream(rb, in, &root, &errs) || !root.isObject()) {
+                            spdlog::warn("Persistence: hidden parts record is not valid JSON; skipped.");
+                            continue;
+                        }
+                        std::size_t applied = 0;
+                        if (root["player"].isArray() && !root["player"].empty()) {
+                            OutfitSession::GetSingleton().WithLibrary([&](OutfitLibrary& a_lib) {
+                                applied += HiddenPartsCodec::ApplyLibrary(root["player"], a_lib);
+                            });
+                        }
+                        if (root["npc"].isArray() && !root["npc"].empty()) {
+                            auto npcs = OutfitSession::GetSingleton().SnapshotNpcAssignments();
+                            for (const auto& n : root["npc"]) {
+                                if (!n.isObject() || !n["m"].isString() || !n["f"].isUInt()) {
+                                    continue;
+                                }
+                                NpcKey key{ n["m"].asString(), n["f"].asUInt() };
+                                const auto it = npcs.find(key);
+                                if (it == npcs.end()) {
+                                    continue;
+                                }
+                                auto lib = it->second.library;
+                                if (const auto got = HiddenPartsCodec::ApplyLibrary(n["o"], lib); got > 0) {
+                                    applied += got;
+                                    OutfitSession::GetSingleton().UpsertNpcLibrary(key, std::move(lib));
+                                }
+                            }
+                        }
+                        spdlog::info("Persistence: restored {} hidden-part entr(ies) from the save.", applied);
+                    } catch (const std::exception& e) {
+                        spdlog::error("Persistence: hidden parts record threw ({}); skipped.", e.what());
                     }
                     continue;
                 }

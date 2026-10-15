@@ -473,6 +473,7 @@ add_commonlibsse_plugin(${PROJECT_NAME}
         src/PieceMorphUI.h
         src/PieceMorphUI.cpp
         src/LayerCopyModel.h
+        src/HiddenPartsCodec.h
         src/LayerCopies.h
         src/LayerCopies.cpp
         src/LayerCopyUI.h
@@ -1243,6 +1244,11 @@ target_include_directories(ArmorExportModelTests PRIVATE src)
 add_executable(TriFileTests tests/test_trifile.cpp)
 target_compile_features(TriFileTests PRIVATE cxx_std_23)
 target_include_directories(TriFileTests PRIVATE src)
+
+add_executable(HiddenPartsTests tests/test_hiddenparts.cpp src/JsonCodec.cpp)
+target_compile_features(HiddenPartsTests PRIVATE cxx_std_23)
+target_include_directories(HiddenPartsTests PRIVATE src)
+target_link_libraries(HiddenPartsTests PRIVATE JsonCpp::JsonCpp)
 
 add_executable(LayerCopyModelTests tests/test_layercopymodel.cpp)
 target_compile_features(LayerCopyModelTests PRIVATE cxx_std_23)

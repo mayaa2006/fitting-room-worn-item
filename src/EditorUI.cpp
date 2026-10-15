@@ -11304,6 +11304,28 @@ namespace OS::EditorUI {
                                          .c_str());
                 }
 
+                // Hidden parts (addon): hide or show the selected part, in this
+                // outfit only. Armour only: that is the walk that hides shapes.
+                if (g_dyeSel.target == DyeTarget::kArmour) {
+                    FUCK::SameLine();
+                    const bool hiddenNow = ch.hidden;
+                    FUCK::PushID("dyeHidePart");
+                    const auto hideBtn = ChamferPanel::IconButton(
+                        Icons::Utf8(hiddenNow ? Icons::kEyeSlash : Icons::kEye).c_str(), false);
+                    FUCK::PopID();
+                    if (hideBtn.clicked) {
+                        g_staged.SetDyeHidden(g_dyeSel.bit, static_cast<DyeChannelId>(g_dyeSel.channel),
+                                              !hiddenNow);
+                        Push();
+                        EditorStyle::PlayUISound("UIMenuFocus");
+                    }
+                    if (hideBtn.hovered) {
+                        FUCK::SetTooltip(hiddenNow
+                                             ? "Show this part\nIt is hidden in this outfit. Click to show it again."
+                                             : "Hide this part\nIn this outfit only. Its colour, if any, is kept.");
+                    }
+                }
+
                 // ⚠ CLEAR ALL ENDS THE ROW, and it is drawn here rather than
                 // below the Special accordion because the accordion is what
                 // used to come between them. The row reads lift, then the three

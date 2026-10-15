@@ -265,6 +265,16 @@ namespace OS::ArmorExport {
                         return RE::BSVisit::BSVisitControl::kContinue;  // not in the mesh file
                     }
                     ++order;
+                    // A part hidden in the outfit (or by anything else) is
+                    // left out of the exported mesh: export what you see.
+                    if (a_geom->GetFlags().any(RE::NiAVObject::Flag::kHidden)) {
+                        NifExport::ShapeEdit rm;
+                        rm.name   = a_geom->name.c_str() ? a_geom->name.c_str() : "";
+                        rm.order  = order;
+                        rm.remove = true;
+                        ad.edits.push_back(std::move(rm));
+                        return RE::BSVisit::BSVisitControl::kContinue;
+                    }
                     auto* mat = MaterialOf(a_geom);
                     if (!mat) {
                         return RE::BSVisit::BSVisitControl::kContinue;

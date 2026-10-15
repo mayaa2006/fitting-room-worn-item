@@ -225,6 +225,12 @@ namespace OS {
         // must keep meaning what they mean. Codec v25 appends it after the
         // blend, so a v24 channel decodes to 128 and paints as it did.
         std::uint8_t cut{ 128 };
+        // Hidden parts (addon): this channel's shapes are not drawn. Independent
+        // of `set` - a part can be hidden with or without a colour - and kept by
+        // SetDye, so re-dyeing or erasing a colour never shows a hidden part.
+        // Not in LIBR (the upstream co-save format stays v25); the addon's own
+        // 'FHID' record and the outfit JSON carry it.
+        bool hidden{ false };
         friend bool operator==(const DyeChannel&, const DyeChannel&) = default;
     };
 
@@ -453,13 +459,26 @@ namespace OS {
     struct SlotDye {
         std::array<DyeChannel, kDyeChannelCount> channels{};
 
+        // A colour OR a hidden part: either one is something to store and
+        // something for the paint walk to visit.
         [[nodiscard]] bool Any() const {
             for (const auto& c : channels) {
-                if (c.set) {
+                if (c.set || c.hidden) {
                     return true;
                 }
             }
             return false;
+        }
+
+        // Channels whose parts are hidden, as a bitmask (bit c = channel c).
+        [[nodiscard]] std::uint32_t HiddenMask() const {
+            std::uint32_t m = 0;
+            for (std::size_t c = 0; c < channels.size() && c < 32; ++c) {
+                if (channels[c].hidden) {
+                    m |= 1u << c;
+                }
+            }
+            return m;
         }
     };
 
@@ -1318,8 +1337,37 @@ namespace OS {
             if (a_bit >= kBitCount) return;
             if (static_cast<std::size_t>(a_channel) >= kDyeChannelCount) return;
             SlotDye staged = DyeFor(a_bit);
+            // A colour edit never touches visibility (addon: hidden parts).
+            a_value.hidden = staged.channels[static_cast<std::size_t>(a_channel)].hidden;
             staged.channels[static_cast<std::size_t>(a_channel)] = a_value;
             SetArmourDye(a_bit, entries_[a_bit].style, staged);
+        }
+
+        // Hidden parts (addon): show or hide one channel's shapes of the
+        // garment in this slot. Its colour, if any, is kept.
+        void SetDyeHidden(std::uint32_t a_bit, DyeChannelId a_channel, bool a_hidden) {
+            if (a_bit >= kBitCount) return;
+            if (static_cast<std::size_t>(a_channel) >= kDyeChannelCount) return;
+            SlotDye staged = DyeFor(a_bit);
+            staged.channels[static_cast<std::size_t>(a_channel)].hidden = a_hidden;
+            SetArmourDye(a_bit, entries_[a_bit].style, staged);
+        }
+
+        // The same, for a garment that may not be the one in the slot now
+        // (restoring a save, where every stored garment's parts come back).
+        void SetArmourHiddenMask(std::uint32_t a_bit, const StyleRefKey& a_garment, std::uint32_t a_mask) {
+            if (a_bit >= kBitCount) return;
+            SlotDye dye{};
+            for (const auto& e : armourDyes_) {
+                if (e.bit == a_bit && e.garment == a_garment) {
+                    dye = e.dye;
+                    break;
+                }
+            }
+            for (std::size_t c = 0; c < kDyeChannelCount; ++c) {
+                dye.channels[c].hidden = c < 32 && (a_mask & (1u << c)) != 0;
+            }
+            SetArmourDye(a_bit, a_garment, dye);
         }
 
         // Drop every colour stored against the garment currently in one slot.
@@ -2173,6 +2221,11 @@ namespace OS {
         const std::array<DyeChannel, kDyeChannelCount>& a_y) {
         for (std::size_t c = 0; c < kDyeChannelCount; ++c) {
             if (a_x[c].set != a_y[c].set) {
+                return true;
+            }
+            // Hidden parts (addon): showing or hiding a part is an edit to
+            // commit, with or without a colour on it.
+            if (a_x[c].hidden != a_y[c].hidden) {
                 return true;
             }
             if (a_x[c].set && !(a_x[c] == a_y[c])) {

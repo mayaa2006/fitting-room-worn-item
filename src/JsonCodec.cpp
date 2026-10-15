@@ -383,6 +383,17 @@ namespace OS::JsonCodec {
                 colours.append(ChannelToJson(ch));
             }
             d["colours"] = std::move(colours);
+            // Hidden parts (addon): the channel positions not drawn. Its own
+            // key, so a reader that does not know it simply ignores it.
+            if (const auto mask = dye.HiddenMask(); mask != 0) {
+                Json::Value hidden(Json::arrayValue);
+                for (std::uint32_t c = 0; c < 32; ++c) {
+                    if (mask & (1u << c)) {
+                        hidden.append(c);
+                    }
+                }
+                d["hidden"] = std::move(hidden);
+            }
             dyes.append(std::move(d));
         }
         if (!dyes.empty()) {
@@ -615,6 +626,19 @@ namespace OS::JsonCodec {
                 continue;
             }
             const auto dyeBit = BitForEditorSlot(dyeSlot);
+            // Hidden parts (addon), applied after the colours below whichever
+            // way they are read; SetDye keeps the flag, so order is free.
+            const auto readHidden = [&] {
+                const auto& hidden = d["hidden"];
+                if (!hidden.isArray()) {
+                    return;
+                }
+                for (const auto& h : hidden) {
+                    if (h.isUInt() && h.asUInt() < kDyeChannelCount) {
+                        a_out.SetDyeHidden(dyeBit, static_cast<DyeChannelId>(h.asUInt()), true);
+                    }
+                }
+            };
             // The "colours" array is what this writes now. The three named keys
             // are still READ, because presets and exports written before the
             // widening use them and there is no reason to strand a file that
@@ -633,6 +657,7 @@ namespace OS::JsonCodec {
                         a_out.SetDye(dyeBit, static_cast<DyeChannelId>(c), col);
                     }
                 }
+                readHidden();
                 continue;
             }
             static constexpr const char* kLegacyChannelNames[3] = {
@@ -648,6 +673,7 @@ namespace OS::JsonCodec {
                     a_out.SetDye(dyeBit, static_cast<DyeChannelId>(c), col);
                 }
             }
+            readHidden();
         }
         for (const auto& w : a_json["weapons"]) {
             if (!w.isObject()) {

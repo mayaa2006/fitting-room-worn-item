@@ -333,6 +333,38 @@ int main() {
         }
     }
 
+    {  // A removed shape is gone; the others keep their names and textures.
+        ShapeEdit rm;
+        rm.order  = target;
+        rm.remove = true;
+        const auto r = Rewrite(skinned, { rm }, {});
+        CHECK(r.ok && r.removed == 1 && r.edited == 1);
+        const auto left = ShapeNames(r.bytes);
+        CHECK(left.size() + 1 == names.size());
+        for (const auto& n : left) {
+            bool known = false;
+            for (const auto& m : names) {
+                known = known || m == n;
+            }
+            CHECK(known);
+        }
+        // Remove plus a texture edit on the other shape in the same pass.
+        if (names.size() >= 2) {
+            const int other = target == 0 ? 1 : 0;
+            ShapeEdit tex;
+            tex.order       = other;
+            tex.textures[0] = "textures\\kept_d.dds";
+            const auto both = Rewrite(skinned, { rm, tex }, {});
+            CHECK(both.ok && both.removed == 1);
+            bool kept = false;
+            for (int i = 0; i < static_cast<int>(ShapeNames(both.bytes).size()); ++i) {
+                const auto t = TexturePaths(both.bytes, i);
+                kept = kept || (!t.empty() && t[0] == "textures\\kept_d.dds");
+            }
+            CHECK(kept);
+        }
+    }
+
     {  // Garbage in is an error, not a crash.
         const auto r = Rewrite({ 1, 2, 3, 4 }, {}, {});
         CHECK(!r.ok);

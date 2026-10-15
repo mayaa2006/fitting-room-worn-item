@@ -4,6 +4,7 @@
 
 #include <NifFile.hpp>
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <functional>
@@ -152,6 +153,7 @@ namespace OS::NifExport {
             ++editNames[e.name];
         }
 
+        std::vector<NiShape*> toRemove;
         for (const auto& e : a_edits) {
             NiShape* target = nullptr;
             if (!e.name.empty() && editNames[e.name] == 1 && fileNames[e.name] == 1) {
@@ -174,6 +176,14 @@ namespace OS::NifExport {
             }
             if (!target) {
                 ++r.unmatched;
+                continue;
+            }
+            if (e.remove) {
+                // Deleted after the remap below, which still walks `shapes`.
+                if (std::find(toRemove.begin(), toRemove.end(), target) == toRemove.end()) {
+                    toRemove.push_back(target);
+                }
+                ++r.edited;
                 continue;
             }
             const bool touchesTextures = !e.textures.empty();
@@ -228,6 +238,11 @@ namespace OS::NifExport {
                     }
                 }
             }
+        }
+
+        for (auto* shape : toRemove) {
+            nif.DeleteShape(shape);
+            ++r.removed;
         }
 
         r.ok = SaveBytes(nif, r.bytes, r.error);
