@@ -474,6 +474,7 @@ add_commonlibsse_plugin(${PROJECT_NAME}
         src/PieceMorphUI.cpp
         src/LayerCopyModel.h
         src/HiddenPartsCodec.h
+        src/ZeroedModel.h
         src/LayerCopies.h
         src/LayerCopies.cpp
         src/LayerCopyUI.h
@@ -1244,6 +1245,11 @@ target_include_directories(ArmorExportModelTests PRIVATE src)
 add_executable(TriFileTests tests/test_trifile.cpp)
 target_compile_features(TriFileTests PRIVATE cxx_std_23)
 target_include_directories(TriFileTests PRIVATE src)
+
+add_executable(ZeroedModelTests tests/test_zeroedmodel.cpp src/BodyMorphData.cpp)
+target_compile_features(ZeroedModelTests PRIVATE cxx_std_23)
+target_include_directories(ZeroedModelTests PRIVATE src)
+target_link_libraries(ZeroedModelTests PRIVATE JsonCpp::JsonCpp)
 
 add_executable(HiddenPartsTests tests/test_hiddenparts.cpp src/JsonCodec.cpp)
 target_compile_features(HiddenPartsTests PRIVATE cxx_std_23)

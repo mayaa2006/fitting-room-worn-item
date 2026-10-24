@@ -673,6 +673,90 @@ namespace OS::NifExport {
     std::vector<std::string> TexturePaths(const std::vector<std::uint8_t>& a_nif, int a_order) {
         return GuardList([&] { return TexturePathsImpl(a_nif, a_order); });
     }
+    std::vector<std::pair<std::string, std::size_t>> ShapeVertexCounts(const std::vector<std::uint8_t>& a_nif) {
+        try {
+            NifFile     nif;
+            std::string err;
+            std::vector<std::pair<std::string, std::size_t>> out;
+            if (!LoadBytes(nif, a_nif, err)) {
+                return out;
+            }
+            for (auto* s : ShapesInOrder(nif)) {
+                out.emplace_back(s->name.get(), static_cast<std::size_t>(s->GetNumVertices()));
+            }
+            return out;
+        } catch (...) {
+            return {};
+        }
+    }
+
+    Result OffsetShapesImpl(const std::vector<std::uint8_t>& a_nif,
+                            const std::map<std::string, std::vector<std::array<float, 3>>>& a_offsets) {
+        Result  r;
+        NifFile nif;
+        if (!LoadBytes(nif, a_nif, r.error)) {
+            return r;
+        }
+        const auto shapes = ShapesInOrder(nif);
+        r.shapes          = static_cast<int>(shapes.size());
+        for (const auto& [name, offsets] : a_offsets) {
+            NiShape* target = nullptr;
+            for (auto* s : shapes) {
+                if (s->name.get() == name) {
+                    target = s;
+                    break;
+                }
+            }
+            if (!target) {
+                const auto want = Lower(name);
+                int        hits = 0;
+                for (auto* s : shapes) {
+                    if (Lower(s->name.get()) == want) {
+                        target = s;
+                        ++hits;
+                    }
+                }
+                if (hits != 1) {
+                    target = nullptr;
+                }
+            }
+            std::vector<Vector3> verts;
+            if (!target || !nif.GetVertsForShape(target, verts) || verts.size() != offsets.size()) {
+                ++r.unmatched;
+                continue;
+            }
+            for (std::size_t i = 0; i < verts.size(); ++i) {
+                verts[i].x += offsets[i][0];
+                verts[i].y += offsets[i][1];
+                verts[i].z += offsets[i][2];
+            }
+            nif.SetVertsForShape(target, verts);
+            ++r.edited;
+        }
+        r.ok = SaveBytes(nif, r.bytes, r.error);
+        return r;
+    }
+
+    Result OffsetShapes(const std::vector<std::uint8_t>& a_nif,
+                        const std::map<std::string, std::vector<std::array<float, 3>>>& a_offsets) {
+        return Guard([&] { return OffsetShapesImpl(a_nif, a_offsets); });
+    }
+
+    std::string VersionKey(const std::vector<std::uint8_t>& a_nif) {
+        try {
+            NifFile     nif;
+            std::string err;
+            if (!LoadBytes(nif, a_nif, err)) {
+                return {};
+            }
+            const auto& v = nif.GetHeader().GetVersion();
+            return std::to_string(static_cast<std::uint32_t>(v.File())) + "/" + std::to_string(v.User()) + "/" +
+                   std::to_string(v.Stream());
+        } catch (...) {
+            return {};
+        }
+    }
+
     std::vector<std::array<float, 3>> Vertices(const std::vector<std::uint8_t>& a_nif, int a_order) {
         try {
             NifFile     nif;

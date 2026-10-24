@@ -104,6 +104,21 @@ namespace OS::NifExport {
     // and diagnostics.
     [[nodiscard]] std::vector<std::string> ShapeNames(const std::vector<std::uint8_t>& a_nif);
 
+    // Every shape's name and vertex count, in depth-first order.
+    [[nodiscard]] std::vector<std::pair<std::string, std::size_t>> ShapeVertexCounts(
+        const std::vector<std::uint8_t>& a_nif);
+
+    // Adds a_offsets[name][i] to vertex i of the shape with that name (exact,
+    // else case-blind when unique). A list whose length is not the shape's
+    // vertex count is not applied (Result::unmatched). Result::edited counts
+    // shapes moved.
+    [[nodiscard]] Result OffsetShapes(const std::vector<std::uint8_t>& a_nif,
+                                      const std::map<std::string, std::vector<std::array<float, 3>>>& a_offsets);
+
+    // "file/user/stream" version of the file, or empty: two meshes for the
+    // same game version compare equal.
+    [[nodiscard]] std::string VersionKey(const std::vector<std::uint8_t>& a_nif);
+
     // Vertex positions of the shape at a_order (depth-first), or empty. For
     // tests and diagnostics.
     [[nodiscard]] std::vector<std::array<float, 3>> Vertices(const std::vector<std::uint8_t>& a_nif, int a_order);

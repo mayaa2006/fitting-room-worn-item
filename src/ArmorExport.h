@@ -68,6 +68,9 @@ namespace OS::ArmorExport {
         std::string                                     pluginName;  // without ".esp"
         std::vector<std::pair<ItemPlan, ItemSettings>> items;
         bool                                            recipe{ true };
+        // Rebuild every BodySlide-built piece from its project at zeroed
+        // sliders, undoing whatever preset it was built with.
+        bool                                            zeroed{ false };
     };
 
     // The body-slider morph names in those tri files (loose files only, as

@@ -107,17 +107,19 @@ namespace OS::PieceMorphModel {
     // morphs on a shape) are left out rather than written wrong.
     [[nodiscard]] inline TriFile::File WithPieceMorphs(const TriFile::File& a_tri, std::string_view a_prefix) {
         TriFile::File out = a_tri;
-        for (auto& shape : out) {
-            const auto original = shape.morphs.size();
+        // Position and texture-coordinate morphs alike: a piece's UV slider
+        // has to stay that piece's too.
+        const auto twinAll = [&](std::vector<TriFile::Morph>& a_morphs) {
+            const auto original = a_morphs.size();
             std::set<std::string> have;
-            for (const auto& m : shape.morphs) {
+            for (const auto& m : a_morphs) {
                 have.insert(m.name);
             }
             for (std::size_t i = 0; i < original; ++i) {
-                if (shape.morphs.size() >= 0xFFFF) {
+                if (a_morphs.size() >= 0xFFFF) {
                     break;
                 }
-                const auto& m = shape.morphs[i];
+                const auto& m = a_morphs[i];
                 if (m.name.empty() || m.name.size() + a_prefix.size() > 255 ||
                     m.name.rfind(a_prefix, 0) == 0) {
                     continue;
@@ -127,8 +129,12 @@ namespace OS::PieceMorphModel {
                 if (!have.insert(twin.name).second) {
                     continue;  // already twinned
                 }
-                shape.morphs.push_back(std::move(twin));
+                a_morphs.push_back(std::move(twin));
             }
+        };
+        for (auto& shape : out) {
+            twinAll(shape.morphs);
+            twinAll(shape.uvMorphs);
         }
         return out;
     }

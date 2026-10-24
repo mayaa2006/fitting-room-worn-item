@@ -139,15 +139,8 @@ namespace OS::BodyMorphSource {
         return out.Usable() ? &out : nullptr;
     }
 
-    const Source* For(const std::string& a_projectFile, const std::string& a_setName) {
-        const std::string cacheKey = a_projectFile + "|" + a_setName;
-        auto&             cache    = Cache();
-        if (const auto it = cache.find(cacheKey); it != cache.end()) {
-            return it->second.Usable() ? &it->second : nullptr;
-        }
-        // Cached either way, so a project that cannot be read is not re-parsed
-        // once per card for the whole session.
-        Source& out = cache[cacheKey];
+    bool Load(const std::string& a_projectFile, const std::string& a_setName, Source& out) {
+        out = Source{};
 
         // ⚠ EVERY REFUSAL BELOW NAMES ITSELF. Two of these six used to warn
         // and the other four returned null in silence, so a crossed card with
@@ -159,14 +152,14 @@ namespace OS::BodyMorphSource {
             spdlog::warn("BodyMorphSource: '{}' would not open as XML, so '{}' gets no "
                          "card.",
                          a_projectFile, a_setName);
-            return nullptr;
+            return false;
         }
         auto* root = doc.FirstChildElement("SliderSetInfo");
         if (!root) {
             spdlog::warn("BodyMorphSource: '{}' has no <SliderSetInfo>, so '{}' gets no "
                          "card.",
                          a_projectFile, a_setName);
-            return nullptr;
+            return false;
         }
 
         std::string dataFolder;
@@ -191,7 +184,7 @@ namespace OS::BodyMorphSource {
                              "and SourceFile '{}', and both are required, so it gets no "
                              "card.",
                              a_projectFile, a_setName, folder, source);
-                return nullptr;
+                return false;
             }
             // ⚠ KEPT, because the .osd needs it too. Both the reference mesh
             // and the deltas live in ShapeData\<DataFolder>\, and losing this
@@ -209,7 +202,8 @@ namespace OS::BodyMorphSource {
                  shape = shape->NextSiblingElement("Shape")) {
                 const char* target = shape->Attribute("target");
                 if (target && *target) {
-                    out.shapes.push_back(ShapeRules{ target, {} });
+                    const char* text = shape->GetText();
+                    out.shapes.push_back(ShapeRules{ target, {}, text && *text ? text : "" });
                 }
             }
             const auto ruleSlot = [&out](std::string_view a_target)
@@ -219,7 +213,7 @@ namespace OS::BodyMorphSource {
                         return &s.rules;
                     }
                 }
-                return nullptr;
+                return false;
             };
 
             for (auto* slider = set->FirstChildElement("Slider"); slider;
@@ -289,7 +283,7 @@ namespace OS::BodyMorphSource {
                          a_projectFile, a_setName,
                          out.referenceMesh.empty() ? "none" : out.referenceMesh,
                          out.shapes.size(), out.RuleCount());
-            return nullptr;
+            return false;
         }
 
         // ⚠⚠ THE .osd SITS WITH THE REFERENCE MESH, NOT WITH THE PROJECT. The
@@ -322,7 +316,7 @@ namespace OS::BodyMorphSource {
                              "card. The file is expected beside the reference mesh in "
                              "ShapeData, not beside the .osp.",
                              osdPath.string(), a_setName);
-                return nullptr;
+                return false;
             }
             BodyMorphData::DeltaSets fileSets;
             if (!BodyMorphData::ParseFile(osdPath.string(), fileSets)) {
@@ -331,7 +325,7 @@ namespace OS::BodyMorphSource {
                              "design: a set that does not land on the final byte is "
                              "refused rather than half read.",
                              osdPath.string(), a_setName);
-                return nullptr;
+                return false;
             }
             // Filed under file-and-name, which is what the rules ask for. See
             // DeltaKey: the same run name in two files is not the same run.
@@ -361,7 +355,19 @@ namespace OS::BodyMorphSource {
                       "osd {} [{}]",
                       a_setName, out.referenceMesh, shapeLine, out.RuleCount(),
                       out.deltas.size(), osdFiles.size(), osdLine);
-        return out.Usable() ? &out : nullptr;
+        return out.Usable();
+    }
+
+    const Source* For(const std::string& a_projectFile, const std::string& a_setName) {
+        const std::string cacheKey = a_projectFile + "|" + a_setName;
+        auto&             cache    = Cache();
+        if (const auto it = cache.find(cacheKey); it != cache.end()) {
+            return it->second.Usable() ? &it->second : nullptr;
+        }
+        // Cached either way, so a project that cannot be read is not re-parsed
+        // once per card for the whole session.
+        Source& out = cache[cacheKey];
+        return Load(a_projectFile, a_setName, out) ? &out : nullptr;
     }
 
 }  // namespace OS::BodyMorphSource

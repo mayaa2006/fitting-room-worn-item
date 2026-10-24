@@ -365,6 +365,35 @@ int main() {
         }
     }
 
+    {  // Vertex counts, offsets by name, version keys.
+        const auto counts = ShapeVertexCounts(skinned);
+        CHECK(counts.size() == names.size());
+        CHECK(!counts.empty() && counts[static_cast<std::size_t>(target)].second ==
+                                     Vertices(skinned, target).size());
+        const auto& name = counts[static_cast<std::size_t>(target)].first;
+        std::map<std::string, std::vector<std::array<float, 3>>> off;
+        off[name].assign(counts[static_cast<std::size_t>(target)].second, { 0.0f, 0.0f, 0.0f });
+        off[name][3] = { 0.0f, 0.0f, 1.5f };
+        off["NoSuchShape"] = { { 1.0f, 1.0f, 1.0f } };
+        const auto r = OffsetShapes(skinned, off);
+        CHECK(r.ok && r.edited == 1 && r.unmatched == 1);
+        const auto before = Vertices(skinned, target);
+        const auto after  = Vertices(r.bytes, target);
+        CHECK(after.size() == before.size());
+        if (after.size() > 3) {
+            CHECK(std::fabs(after[3][2] - (before[3][2] + 1.5f)) < 1e-4f);
+            CHECK(after[4] == before[4]);
+        }
+        // A list of the wrong length is not applied.
+        std::map<std::string, std::vector<std::array<float, 3>>> shortList;
+        shortList[name] = { { 9.0f, 9.0f, 9.0f } };
+        const auto bad = OffsetShapes(skinned, shortList);
+        CHECK(bad.ok && bad.edited == 0 && bad.unmatched == 1);
+        CHECK(!VersionKey(skinned).empty() && VersionKey(skinned) == VersionKey(dynamic));
+        CHECK(VersionKey({ 1, 2, 3 }).empty());
+        CHECK(ShapeVertexCounts({ 1, 2, 3 }).empty());
+    }
+
     {  // Garbage in is an error, not a crash.
         const auto r = Rewrite({ 1, 2, 3, 4 }, {}, {});
         CHECK(!r.ok);

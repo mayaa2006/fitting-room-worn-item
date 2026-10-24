@@ -28,6 +28,7 @@
 // re-arranged (shapes renamed and gathered into one file) is written back
 // bit for bit. Engine-free: tests/test_trifile.cpp.
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <cstdint>
@@ -60,6 +61,9 @@ namespace OS::TriFile {
     struct Shape {
         std::string        name;
         std::vector<Morph> morphs;
+        // Texture-coordinate morphs (BodySlide's UV sliders), from the file's
+        // second section; z is unused. Carried through untouched.
+        std::vector<Morph> uvMorphs;
     };
 
     using File = std::vector<Shape>;
@@ -136,6 +140,12 @@ namespace OS::TriFile {
 
     // Nothing for a file that is not a tri or is cut short: half a file would
     // move some vertices and not others.
+    //
+    // ⚠ TWO SECTIONS, AS BODYSLIDE WRITES THEM (TriFile::Write, BodySlide and
+    // Outfit Studio source): the position morphs, then a u16 count of shapes
+    // with texture-coordinate morphs and those morphs (6 bytes a delta: index,
+    // u, v). The second section is optional on read, as BodySlide's own reader
+    // treats it; a file that ends cleanly after the first is an older one.
     [[nodiscard]] inline std::optional<File> Parse(std::string_view a_bytes) {
         if (a_bytes.size() < 6 || a_bytes.substr(0, 4) != "PIRT") {
             return std::nullopt;
@@ -171,6 +181,47 @@ namespace OS::TriFile {
         if (!r.ok) {
             return std::nullopt;
         }
+        if (r.at < a_bytes.size()) {
+            const auto uvShapes = r.U16();
+            for (std::size_t s = 0; s < uvShapes && r.ok; ++s) {
+                const auto name   = r.Str();
+                const auto morphs = r.U16();
+                std::vector<Morph> uv;
+                for (std::size_t m = 0; m < morphs && r.ok; ++m) {
+                    Morph mo;
+                    mo.name          = r.Str();
+                    mo.multiplier    = r.F32();
+                    const auto count = r.U16();
+                    if (!r.Have(static_cast<std::size_t>(count) * 6u)) {
+                        return std::nullopt;
+                    }
+                    mo.deltas.resize(count);
+                    for (auto& d : mo.deltas) {
+                        d.index = r.U16();
+                        d.x     = r.I16();
+                        d.y     = r.I16();
+                    }
+                    uv.push_back(std::move(mo));
+                }
+                Shape* into = nullptr;
+                for (auto& sh : out) {
+                    if (sh.name == name) {
+                        into = &sh;
+                        break;
+                    }
+                }
+                if (!into) {
+                    out.push_back(Shape{ name, {}, {} });
+                    into = &out.back();
+                }
+                for (auto& m : uv) {
+                    into->uvMorphs.push_back(std::move(m));
+                }
+            }
+            if (!r.ok) {
+                return std::nullopt;
+            }
+        }
         return out;
     }
 
@@ -179,33 +230,79 @@ namespace OS::TriFile {
     }
 
     // At most 65535 shapes, morphs per shape and deltas per morph are written
-    // (the wire fields are u16); a well-formed input never has more.
+    // (the wire fields are u16); a well-formed input never has more. Shapes
+    // with no morphs of a kind are left out of that kind's section, and the
+    // second section's count is always written, both as BodySlide does.
     [[nodiscard]] inline std::vector<std::uint8_t> Serialize(const File& a_file) {
         std::vector<std::uint8_t> o{ 'P', 'I', 'R', 'T' };
         const auto clamp = [](std::size_t n) { return static_cast<std::uint16_t>(n > 0xFFFF ? 0xFFFF : n); };
-        const auto shapes = clamp(a_file.size());
-        detail::PutU16(o, shapes);
-        for (std::size_t s = 0; s < shapes; ++s) {
-            const auto& sh = a_file[s];
-            detail::PutStr(o, sh.name);
-            const auto morphs = clamp(sh.morphs.size());
-            detail::PutU16(o, morphs);
-            for (std::size_t m = 0; m < morphs; ++m) {
-                const auto& mo = sh.morphs[m];
-                detail::PutStr(o, mo.name);
-                detail::PutF32(o, mo.multiplier);
-                const auto count = clamp(mo.deltas.size());
-                detail::PutU16(o, count);
-                for (std::size_t i = 0; i < count; ++i) {
-                    const auto& d = mo.deltas[i];
-                    detail::PutU16(o, d.index);
-                    detail::PutU16(o, static_cast<std::uint16_t>(d.x));
-                    detail::PutU16(o, static_cast<std::uint16_t>(d.y));
-                    detail::PutU16(o, static_cast<std::uint16_t>(d.z));
+        const auto section = [&](bool a_uv) {
+            std::vector<const Shape*> list;
+            for (const auto& sh : a_file) {
+                if (!(a_uv ? sh.uvMorphs : sh.morphs).empty() && list.size() < 0xFFFF) {
+                    list.push_back(&sh);
                 }
             }
-        }
+            detail::PutU16(o, static_cast<std::uint16_t>(list.size()));
+            for (const auto* sh : list) {
+                const auto& morphsOf = a_uv ? sh->uvMorphs : sh->morphs;
+                detail::PutStr(o, sh->name);
+                const auto morphs = clamp(morphsOf.size());
+                detail::PutU16(o, morphs);
+                for (std::size_t m = 0; m < morphs; ++m) {
+                    const auto& mo = morphsOf[m];
+                    detail::PutStr(o, mo.name);
+                    detail::PutF32(o, mo.multiplier);
+                    const auto count = clamp(mo.deltas.size());
+                    detail::PutU16(o, count);
+                    for (std::size_t i = 0; i < count; ++i) {
+                        const auto& d = mo.deltas[i];
+                        detail::PutU16(o, d.index);
+                        detail::PutU16(o, static_cast<std::uint16_t>(d.x));
+                        detail::PutU16(o, static_cast<std::uint16_t>(d.y));
+                        if (!a_uv) {
+                            detail::PutU16(o, static_cast<std::uint16_t>(d.z));
+                        }
+                    }
+                }
+            }
+        };
+        section(false);
+        section(true);
         return o;
+    }
+
+    // One morph from float offsets, quantized the way BodySlide's writer does
+    // (multiplier = largest component / 32767, components truncated). Zero
+    // offsets are dropped. Empty when nothing moves.
+    [[nodiscard]] inline Morph Quantize(std::string a_name, const std::vector<std::uint16_t>& a_indices,
+                                        const std::vector<std::array<float, 3>>& a_offsets, bool a_uv = false) {
+        Morph m;
+        m.name    = std::move(a_name);
+        float big = 0.0f;
+        for (std::size_t i = 0; i < a_indices.size() && i < a_offsets.size(); ++i) {
+            for (int c = 0; c < (a_uv ? 2 : 3); ++c) {
+                const float v = a_offsets[i][static_cast<std::size_t>(c)];
+                big           = std::max(big, v < 0.0f ? -v : v);
+            }
+        }
+        if (big <= 0.0f) {
+            return m;
+        }
+        m.multiplier = big / 32767.0f;
+        for (std::size_t i = 0; i < a_indices.size() && i < a_offsets.size(); ++i) {
+            const auto& v = a_offsets[i];
+            if (v[0] == 0.0f && v[1] == 0.0f && (a_uv || v[2] == 0.0f)) {
+                continue;
+            }
+            Delta d;
+            d.index = a_indices[i];
+            d.x     = static_cast<std::int16_t>(v[0] / m.multiplier);
+            d.y     = static_cast<std::int16_t>(v[1] / m.multiplier);
+            d.z     = a_uv ? std::int16_t{ 0 } : static_cast<std::int16_t>(v[2] / m.multiplier);
+            m.deltas.push_back(d);
+        }
+        return m;
     }
 
     // The shapes of a_file that a merge kept, under their merged names.

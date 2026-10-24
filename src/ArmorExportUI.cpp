@@ -23,6 +23,7 @@ namespace OS::ArmorExportUI {
         std::vector<ArmorExport::ItemSettings> g_settings;
         std::string                         g_pluginName;
         bool                                g_recipe = true;
+        bool                                g_zeroed = false;  // kept between openings
 
         // Per item, per piece: the morph names its tri files carry. Read off
         // the draw thread (a body-slider tri is megabytes), once per opening.
@@ -199,6 +200,12 @@ namespace OS::ArmorExportUI {
             FUCK::TextWrapped("%s", sk.c_str());
         }
         FUCK::Checkbox("Craftable for free at any forge", &g_recipe, false, false);
+        FUCK::Checkbox("Export with zeroed sliders", &g_zeroed, false, false);
+        if (FUCK::IsItemHovered()) {
+            FUCK::SetTooltip("Rebuilds every BodySlide-built piece from its BodySlide project with all sliders at\n"
+                             "zero, undoing the preset it was built with. The armor keeps its body sliders, so\n"
+                             "OBody or RaceMenu shapes it in game. Pieces not built by BodySlide are unchanged.");
+        }
         FUCK::EndDisabled();
 
         FUCK::Spacing();
@@ -217,6 +224,7 @@ namespace OS::ArmorExportUI {
             ArmorExport::Request req;
             req.pluginName = g_pluginName;
             req.recipe     = g_recipe;
+            req.zeroed     = g_zeroed;
             for (std::size_t i = 0; i < g_plan.items.size() && i < g_settings.size(); ++i) {
                 req.items.emplace_back(g_plan.items[i], g_settings[i]);
             }

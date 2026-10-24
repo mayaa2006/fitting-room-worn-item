@@ -1,11 +1,20 @@
 #include "ArmorExport.h"
 
+#include "BodyMeshPath.h"
 #include "BodyMorphTri.h"
 #include "EspWriter.h"
 #include "NifExport.h"
 #include "RendererData.h"
 #include "StyleRef.h"
 #include "TriFile.h"
+
+// Zeroed-slider export reads BodySlide projects through Body Studio's loader,
+// which only the default (FR_BODY_STUDIO) build carries.
+#if defined(FR_BODY_STUDIO)
+#    include "BodyMorphSource.h"
+#    include "ZeroedModel.h"
+#    include <tinyxml2.h>
+#endif
 
 #include <DirectXTex.h>
 #include <d3d11.h>
@@ -23,6 +32,7 @@
 #include <optional>
 #include <set>
 #include <thread>
+#include <unordered_map>
 
 namespace OS::ArmorExport {
 
@@ -103,6 +113,7 @@ namespace OS::ArmorExport {
             std::string              pluginName;  // file stem, no extension
             std::string              stem;        // folder stem
             bool                     recipe{ true };
+            bool                     zeroed{ false };  // rebuild BodySlide pieces at zeroed sliders
             std::vector<Item>        items;
             std::vector<Bake>        bakes;
             std::vector<std::string> notes;
@@ -397,6 +408,7 @@ namespace OS::ArmorExport {
             job->stem       = M::SafeStem(job->pluginName, 16, "Outfit") + "_" +
                         M::HashHex(job->pluginName).substr(0, 6);
             job->recipe     = a_req.recipe;
+            job->zeroed     = a_req.zeroed;
 
             auto* player = RE::PlayerCharacter::GetSingleton();
             auto* base   = player ? player->GetActorBase() : nullptr;
@@ -619,6 +631,190 @@ namespace OS::ArmorExport {
             return true;
         }
 
+        // ---- zeroed sliders: rebuild BodySlide pieces from their projects ----
+
+        struct ZeroProject {
+            std::string project;  // the .osp
+            std::string set;      // the slider set in it
+        };
+
+        struct ZeroPiece {
+            bool                         ok{ false };
+            std::vector<std::uint8_t>    bytes;  // the zero build
+            std::optional<TriFile::File> tri;    // its body-slider file
+            std::string                  why;    // when not ok
+        };
+
+        struct ZeroContext {
+            std::unordered_multimap<std::string, ZeroProject> index;  // mesh key -> sets that build it
+            std::map<std::string, ZeroPiece>                  cache;  // mesh key -> result
+        };
+
+#if defined(FR_BODY_STUDIO)
+        std::vector<std::uint8_t> ReadLoose(const fs::path& a_path) {
+            std::error_code ec;
+            const auto      size = fs::file_size(a_path, ec);
+            if (ec || size == 0 || size > 256ull * 1024ull * 1024ull) {
+                return {};
+            }
+            std::ifstream             in(a_path, std::ios::binary);
+            std::vector<std::uint8_t> out(static_cast<std::size_t>(size));
+            if (!in.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(size))) {
+                return {};
+            }
+            return out;
+        }
+
+        // Every slider set BodySlide knows, by the mesh it builds.
+        void BuildZeroIndex(ZeroContext& a_ctx) {
+            const fs::path  root{ "Data/CalienteTools/BodySlide/SliderSets" };
+            std::error_code ec;
+            if (!fs::is_directory(root, ec)) {
+                return;
+            }
+            std::size_t files = 0;
+            for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end;
+                 !ec && it != end; it.increment(ec)) {
+                if (!it->is_regular_file(ec)) {
+                    continue;
+                }
+                auto ext = it->path().extension().string();
+                for (auto& c : ext) {
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                }
+                if (ext != ".osp" && ext != ".xml") {
+                    continue;
+                }
+                const auto bytes = ReadLoose(it->path());
+                if (bytes.empty()) {
+                    continue;
+                }
+                tinyxml2::XMLDocument doc;
+                if (doc.Parse(reinterpret_cast<const char*>(bytes.data()), bytes.size()) != tinyxml2::XML_SUCCESS) {
+                    continue;
+                }
+                auto* info = doc.FirstChildElement("SliderSetInfo");
+                if (!info) {
+                    continue;
+                }
+                ++files;
+                for (auto* set = info->FirstChildElement("SliderSet"); set; set = set->NextSiblingElement("SliderSet")) {
+                    const char* name = set->Attribute("name");
+                    auto*       file = set->FirstChildElement("OutputFile");
+                    if (!name || !*name || !file || !file->GetText()) {
+                        continue;
+                    }
+                    auto*       dir  = set->FirstChildElement("OutputPath");
+                    const char* dirT = dir && dir->GetText() ? dir->GetText() : "";
+                    auto        key  = BodyMeshKey(dirT, file->GetText());
+                    if (!key.empty()) {
+                        a_ctx.index.emplace(std::move(key), ZeroProject{ it->path().string(), name });
+                    }
+                }
+            }
+            spdlog::info("ArmorExport: {} BodySlide project file(s), {} slider set(s) indexed for zeroed export.",
+                         files, a_ctx.index.size());
+        }
+
+        // The zero build of one built mesh, from whichever slider set builds
+        // it and matches it shape for shape. Cached per mesh (both weights).
+        const ZeroPiece& ZeroFor(ZeroContext& a_ctx, const std::string& a_modelPath,
+                                 const std::vector<std::uint8_t>& a_built) {
+            const auto key = BodyMeshKey(a_modelPath);
+            if (const auto it = a_ctx.cache.find(key); it != a_ctx.cache.end()) {
+                return it->second;
+            }
+            ZeroPiece& out = a_ctx.cache[key];
+            const auto range = a_ctx.index.equal_range(key);
+            if (range.first == range.second) {
+                out.why = "not built by BodySlide";
+                return out;
+            }
+            const auto builtVersion = NifExport::VersionKey(a_built);
+            std::map<std::string, std::size_t> builtCounts;
+            for (auto& [n, c] : NifExport::ShapeVertexCounts(a_built)) {
+                builtCounts.emplace(n, c);
+            }
+
+            int                                best = -1;
+            BodyMorphSource::Source            bestSrc;
+            std::vector<std::uint8_t>          bestBase;
+            std::map<std::string, std::size_t> bestCounts;
+            std::string                        lastWhy = "its BodySlide project could not be read";
+            for (auto it = range.first; it != range.second; ++it) {
+                BodyMorphSource::Source src;
+                if (!BodyMorphSource::Load(it->second.project, it->second.set, src)) {
+                    continue;
+                }
+                const auto base = ReadLoose(fs::path("Data") / src.referenceMesh);
+                if (base.empty()) {
+                    lastWhy = "its BodySlide reference mesh is missing";
+                    continue;
+                }
+                if (NifExport::VersionKey(base) != builtVersion) {
+                    lastWhy = "its BodySlide project is for another game version";
+                    continue;
+                }
+                std::map<std::string, std::size_t> counts;
+                for (auto& [n, c] : NifExport::ShapeVertexCounts(base)) {
+                    counts.emplace(n, c);
+                }
+                // Every built shape must be in the project's mesh, and no
+                // smaller (a zap can only have taken vertices away).
+                int  score = 0;
+                bool fits  = true;
+                for (const auto& [n, c] : builtCounts) {
+                    const auto b = ZeroedModel::FindShape(counts, n);
+                    if (b == counts.end() || b->second < c) {
+                        fits = false;
+                        break;
+                    }
+                    score += b->second == c ? 1 : 0;
+                }
+                if (!fits) {
+                    lastWhy = "its BodySlide project does not match the built mesh";
+                    continue;
+                }
+                if (score > best) {
+                    best       = score;
+                    bestSrc    = std::move(src);
+                    bestBase   = base;
+                    bestCounts = std::move(counts);
+                    spdlog::info("ArmorExport: zeroed '{}' from set '{}' ({}), {} of {} shape(s) exact.",
+                                 a_modelPath, it->second.set, it->second.project, score, builtCounts.size());
+                }
+            }
+            if (best < 0) {
+                out.why = lastWhy;
+                return out;
+            }
+            for (const auto& zap : ZeroedModel::ZapsOnAtZero(bestSrc)) {
+                spdlog::warn("ArmorExport: '{}': slider '{}' would delete geometry at zero; left off.", a_modelPath,
+                             zap);
+            }
+            auto moved = NifExport::OffsetShapes(bestBase, ZeroedModel::ZeroOffsets(bestSrc, bestCounts));
+            if (!moved.ok) {
+                out.why = "rebuilding it failed (" + moved.error + ")";
+                return out;
+            }
+            out.ok    = true;
+            out.bytes = std::move(moved.bytes);
+            auto tri  = ZeroedModel::TriFromSource(bestSrc, bestCounts);
+            if (!tri.empty()) {
+                out.tri = std::move(tri);
+            }
+            return out;
+        }
+#else
+        void BuildZeroIndex(ZeroContext&) {}
+        const ZeroPiece& ZeroFor(ZeroContext& a_ctx, const std::string& a_modelPath,
+                                 const std::vector<std::uint8_t>&) {
+            ZeroPiece& out = a_ctx.cache[BodyMeshKey(a_modelPath)];
+            out.why        = "this build has no BodySlide project reader";
+            return out;
+        }
+#endif
+
         // A tri file named by a mesh (BODYTRI is meshes-relative), parsed.
         std::optional<TriFile::File> ReadTri(const std::string& a_meshesRel) {
             if (a_meshesRel.empty()) {
@@ -643,7 +839,8 @@ namespace OS::ArmorExport {
         // follows the wearer's body sliders.
         bool BuildNif(const Item& a_item, const std::string& a_variant, bool a_firstPerson,
                       const std::string& a_triRel, std::vector<std::uint8_t>& a_out,
-                      std::vector<std::uint8_t>& a_triOut, std::vector<std::string>& a_notes, std::string& a_err) {
+                      std::vector<std::uint8_t>& a_triOut, std::vector<std::string>& a_notes, std::string& a_err,
+                      ZeroContext* a_zero) {
             a_triOut.clear();
             // Notes once per item, not once per weight variant.
             const bool report = !a_firstPerson && a_variant != "_0";
@@ -673,6 +870,15 @@ namespace OS::ArmorExport {
                     a_notes.push_back("could not read meshes\\" + M::RecordModelPath(path));
                     continue;
                 }
+                // Zeroed sliders: the same piece rebuilt from its BodySlide
+                // project, in place of whatever preset built the file.
+                const ZeroPiece* zero = nullptr;
+                if (a_zero) {
+                    zero = &ZeroFor(*a_zero, M::RecordModelPath(path), bytes);
+                    if (zero->ok) {
+                        bytes = zero->bytes;
+                    }
+                }
                 // Third person: the per-shape edits only, which are exact.
                 // First person has no live shapes to match, so it takes the
                 // path remap instead (a texture the third-person bake
@@ -690,14 +896,23 @@ namespace OS::ArmorExport {
                 }
                 PartTri pt;
                 if (!a_firstPerson) {
-                    const auto linkPath = NifExport::BodyTriPath(r.bytes);
-                    pt.linked           = !linkPath.empty();
-                    pt.tri              = ReadTri(linkPath);
-                    // The menu listed the morphs of the tri BodySlide wrote
-                    // beside the mesh; use that one when the mesh names none.
-                    auto bakeTri = pt.tri;
-                    if (!bakeTri && !pt.linked) {
-                        bakeTri = ReadTri(BodyMorphTri::TriPathFor(M::RecordModelPath(model)));
+                    std::optional<TriFile::File> bakeTri;
+                    if (zero && zero->ok) {
+                        // The zero build's own sliders, rebuilt from the
+                        // project on its own vertices.
+                        pt.linked = zero->tri.has_value();
+                        pt.tri    = zero->tri;
+                        bakeTri   = zero->tri;
+                    } else {
+                        const auto linkPath = NifExport::BodyTriPath(r.bytes);
+                        pt.linked           = !linkPath.empty();
+                        pt.tri              = ReadTri(linkPath);
+                        // The menu listed the morphs of the tri BodySlide wrote
+                        // beside the mesh; use that one when the mesh names none.
+                        bakeTri = pt.tri;
+                        if (!bakeTri && !pt.linked) {
+                            bakeTri = ReadTri(BodyMorphTri::TriPathFor(M::RecordModelPath(model)));
+                        }
                     }
                     if (!ad.morphs.empty()) {
                         if (!bakeTri) {
@@ -906,6 +1121,12 @@ namespace OS::ArmorExport {
                 }
 
                 // 2. Meshes.
+                std::unique_ptr<ZeroContext> zeroCtx;
+                if (job.zeroed) {
+                    SetStatus("Reading your BodySlide projects...");
+                    zeroCtx = std::make_unique<ZeroContext>();
+                    BuildZeroIndex(*zeroCtx);
+                }
                 const std::string meshRel = "FittingRoom\\Armor\\" + job.stem + "\\";
                 EspWriter::PluginSpec spec;
                 spec.author      = "Fitting Room";
@@ -931,7 +1152,7 @@ namespace OS::ArmorExport {
                     for (const auto& v : variants) {
                         std::vector<std::uint8_t> bytes;
                         std::vector<std::uint8_t> tri;
-                        if (!BuildNif(item, v, false, triRel, bytes, tri, job.notes, err)) {
+                        if (!BuildNif(item, v, false, triRel, bytes, tri, job.notes, err, zeroCtx.get())) {
                             Fail(job, err);
                             return;
                         }
@@ -973,7 +1194,7 @@ namespace OS::ArmorExport {
                         for (const auto& v : variants) {
                             std::vector<std::uint8_t> bytes;
                             std::vector<std::uint8_t> noTri;
-                            if (!BuildNif(item, v, true, {}, bytes, noTri, job.notes, err)) {
+                            if (!BuildNif(item, v, true, {}, bytes, noTri, job.notes, err, zeroCtx.get())) {
                                 Fail(job, err);
                                 return;
                             }
@@ -1086,6 +1307,32 @@ namespace OS::ArmorExport {
                 std::string msg = "Made " + std::to_string(written) + " item" + (written == 1 ? "" : "s") +
                                   " in \"" + espName + "\". Enable it in your mod manager's plugin list and "
                                   "restart the game, then craft them at any forge.";
+                if (zeroCtx) {
+                    std::size_t              zeroed = 0, notBodySlide = 0;
+                    std::vector<std::string> failed;
+                    for (const auto& [key, z] : zeroCtx->cache) {
+                        if (z.ok) {
+                            ++zeroed;
+                            continue;
+                        }
+                        spdlog::info("ArmorExport: exported as built: {} - {}", key, z.why);
+                        if (z.why == "not built by BodySlide") {
+                            ++notBodySlide;
+                        } else {
+                            failed.push_back(key + ": " + z.why);
+                        }
+                    }
+                    msg += " Zeroed sliders: " + std::to_string(zeroed) + " mesh" + (zeroed == 1 ? "" : "es") +
+                           " rebuilt from BodySlide";
+                    if (notBodySlide > 0) {
+                        msg += ", " + std::to_string(notBodySlide) + " not built by BodySlide and left as they are";
+                    }
+                    if (!failed.empty()) {
+                        msg += ", " + std::to_string(failed.size()) + " left as built because " + failed.front() +
+                               (failed.size() > 1 ? " (and more, see the log)" : "");
+                    }
+                    msg += ".";
+                }
                 if (!job.notes.empty()) {
                     msg += " Note: " + job.notes.front();
                     if (job.notes.size() > 1) {

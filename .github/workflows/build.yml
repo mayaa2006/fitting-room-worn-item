@@ -80,7 +80,7 @@ jobs:
         shell: pwsh
         run: |
           $failed = @()
-          foreach ($t in 'RuleModelTests', 'RuleCodecTests', 'RuleEngineTests', 'FollowerMirrorTests', 'EspWriterTests', 'ArmorExportModelTests', 'TriFileTests', 'PieceMorphModelTests', 'LayerCopyModelTests', 'HiddenPartsTests', 'NifExportTests') {
+          foreach ($t in 'RuleModelTests', 'RuleCodecTests', 'RuleEngineTests', 'FollowerMirrorTests', 'EspWriterTests', 'ArmorExportModelTests', 'TriFileTests', 'PieceMorphModelTests', 'LayerCopyModelTests', 'HiddenPartsTests', 'ZeroedModelTests', 'NifExportTests') {
             Write-Host "== $t"
             & "build\release\$t.exe"
             if ($LASTEXITCODE -ne 0) { $failed += $t }

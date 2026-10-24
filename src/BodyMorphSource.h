@@ -43,6 +43,10 @@ namespace OS::BodyMorphSource {
     struct ShapeRules {
         std::string                shape;  // the .osp's <Shape target="...">
         BodyMorphData::SliderRules rules;  // this shape's own <Data> runs
+        // The geometry's name in the reference NIF: the <Shape> element's
+        // text, which BodySlide looks the shape up by. Usually the same as
+        // the target; empty means it is.
+        std::string                nifName{};
     };
 
     struct Source {
@@ -75,6 +79,12 @@ namespace OS::BodyMorphSource {
     //
     // The returned pointer is owned by the cache and stays valid for the
     // session. Render thread only, like the rest of the preview build.
+    // The same read, uncached and with no shared state: safe from any thread
+    // (the "Make real armor" worker uses it). False when the set is unusable;
+    // the reason is logged.
+    [[nodiscard]] bool Load(const std::string& a_projectFile, const std::string& a_setName,
+                            Source& a_out);
+
     [[nodiscard]] const Source* For(const std::string& a_projectFile,
                                     const std::string& a_setName);
 
