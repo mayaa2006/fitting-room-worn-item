@@ -1,0 +1,7 @@
+run: 40138457404
+source commit: 888d788137333c5be81b6f9b8145271bc063cbcf
+out/BUILD-INFO.txt
+out/FittingRoom-WornItem/SKSE/Plugins/FittingRoom.dll
+out/build-log.txt
+out/pdb/FittingRoom.pdb
+361d8a5703cec9d9ce03d3c9fc2e3fc0d5c7322e1ffc6efaa640483dc401f234  out/FittingRoom-WornItem/SKSE/Plugins/FittingRoom.dll
