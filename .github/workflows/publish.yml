@@ -19,13 +19,16 @@ permissions:
 
 jobs:
   publish:
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    # Failed builds publish their log too, onto "build-failed", so the last
+    # good DLL on "build-output" is never replaced by a broken run.
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure'
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       RUN_ID: ${{ github.event.inputs.run_id || github.event.workflow_run.id }}
     steps:
       - name: Download the plugin
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: FittingRoom-WornItem
@@ -34,6 +37,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download the symbols
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: FittingRoom-pdb
@@ -44,6 +48,7 @@ jobs:
       - name: Fetch the build log
         run: |
           set -x
+          mkdir -p out
           api="https://api.github.com/repos/${{ github.repository }}"
           job=$(curl -sSf -H "Authorization: Bearer $GH_TOKEN" "$api/actions/runs/$RUN_ID/jobs" | jq -r '.jobs[0].id')
           # curl drops the Authorization header on the cross-host redirect to
@@ -63,9 +68,11 @@ jobs:
       - name: Commit to the build-output branch
         run: |
           cd out
-          git init -q -b build-output
+          branch=build-output
+          if [ ! -f FittingRoom-WornItem/SKSE/Plugins/FittingRoom.dll ]; then branch=build-failed; fi
+          git init -q -b "$branch"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
           git commit -q -m "Build output for run $RUN_ID"
-          git push -f "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" build-output
+          git push -f "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" "$branch"
