@@ -213,7 +213,7 @@ namespace OS::BodyMorphSource {
                         return &s.rules;
                     }
                 }
-                return false;
+                return nullptr;
             };
 
             for (auto* slider = set->FirstChildElement("Slider"); slider;
